@@ -1,0 +1,16 @@
+{
+  "casgen": {
+    "display_name": "网盘影视转CAS瘦身工具",
+    "desc": "把移动云盘(139)里已有的原视频零流量变成几 KB 的 .cas 文件\n用光鸭版 OpenList 挂载云盘后可直接点 .cas 播放\n纯网页操作，不需要命令行",
+    "labels": "工具,网盘,影视,OpenList",
+    "version": "1.0.0",
+    "author": "casgen",
+    "author_url": "https://github.com/OWNER_PLACEHOLDER/casgen",
+    "bug_report_url": "https://github.com/OWNER_PLACEHOLDER/casgen/issues",
+    "install_type": "存储空间",
+    "size": "5",
+    "history": {
+      "v1.0.0": "首个飞牛可用版本：Docker 镜像 + 网页零流量转 CAS"
+    }
+  }
+}

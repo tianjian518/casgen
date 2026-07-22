@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>网盘影视 转 CAS 瘦身工具 v2026-07-22b</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  textarea, input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button.danger { background:#dc2626; }
+  button:disabled { background:#9ca3af; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .folder { display:inline-block; background:#eef2ff; border:1px solid #c7d2fe; border-radius:6px; padding:6px 10px; margin:4px; cursor:pointer; }
+  .folder:hover { background:#dbeafe; }
+  .crumb a { color:#2563eb; cursor:pointer; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .warn { color:#d97706; } .err { color:#dc2626; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+</style>
+</head>
+<body>
+<h1>🎬 网盘影视 转 CAS 瘦身工具 <span id="ver" class="muted">v2026-07-22b</span></h1>
+<p class="muted">把网盘里已有的原视频"零流量"变成几 KB 的 .cas 文件（删掉原视频腾空间，播放时从 .cas 临时恢复）。全部用鼠标操作。</p>
+
+<!-- 步骤1：登录 -->
+<div class="card">
+  <h3>第 1 步：选择网盘并登录</h3>
+  <div class="row">
+    <label><input type="radio" name="prov" value="139" checked> 移动云盘 (139)</label>
+    <label><input type="radio" name="prov" value="189" disabled> 天翼云盘 (189) <span class="muted">（暂未完成）</span></label>
+  </div>
+  <label>Authorization 头（从浏览器抓包复制，见 README）</label>
+  <textarea id="auth" rows="3" placeholder="Bearer xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></textarea>
+  <button id="loginBtn">登录并加载根目录</button>
+  <div id="loginMsg"></div>
+</div>
+
+<!-- 步骤2：浏览目录 -->
+<div class="card" id="browseCard" style="display:none">
+  <h3>第 2 步：选择要处理的文件夹</h3>
+  <div class="crumb" id="crumb"></div>
+  <div id="folders"></div>
+  <div class="row">
+    <button id="useFolderBtn" class="sec">✔ 选定此文件夹用于转换</button>
+    <span id="selFolderName" class="muted"></span>
+  </div>
+</div>
+
+<!-- 步骤3：分析 + 转换 -->
+<div class="card" id="opCard" style="display:none">
+  <h3>第 3 步：分析并转换</h3>
+  <div class="row">
+    <button id="planBtn">① 先分析（看看哪些能转）</button>
+    <button id="convertBtn" class="danger">② 开始转换（生成 .cas）</button>
+  </div>
+  <p class="muted">转换后，会在每个原视频<b>所在的文件夹</b>里生成一个同名 .cas 文件（几 KB，零流量）。原视频仍在云盘，删不删由你决定。<b>之后用光鸭版 OpenList 挂载这个云盘，就能直接点 .cas 播放。</b></p>
+  <label style="margin-top:10px"><input type="checkbox" id="delChk"> 生成后删除原视频（⚠️ 先不勾，确认 .cas 能恢复再勾）</label>
+  <div id="planMsg"></div>
+  <div id="convMsg"></div>
+</div>
+
+<!-- 步骤4：恢复播放 -->
+<div class="card" id="restoreCard" style="display:none">
+  <h3>第 4 步：从 .cas 恢复播放</h3>
+  <p class="muted">下面是你刚转换出来的记录，点"恢复"会在网盘里重新生成原视频。</p>
+  <table id="recTable"><thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script>
+let state = { currentParent: "root", selectedRoot: "root", selectedName: "", path: [["root","根目录"]] };
+
+function dbg(o){ document.getElementById("debug").textContent = JSON.stringify(o, null, 2); }
+function api(payload){
+  return fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) }).then(r=>r.json());
+}
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+document.getElementById("loginBtn").onclick = async () => {
+  const prov = document.querySelector('input[name=prov]:checked').value;
+  const auth = document.getElementById("auth").value.trim();
+  const msg = document.getElementById("loginMsg");
+  msg.innerHTML = "登录中…";
+  try {
+    const r = await api({ action:"login", provider:prov, authorization:auth });
+    dbg(r);
+    if (r.version) document.getElementById("ver").textContent = "v"+r.version;
+    if (!r.ok){ msg.innerHTML = '<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    msg.innerHTML = '<span class="ok">登录成功 ✔ 根目录共 '+(r.count||0)+' 个项目</span> <span class="muted">[程序版本 '+(r.version||document.getElementById("ver").textContent||"未知")+']</span>';
+    document.getElementById("browseCard").style.display = "block";
+    document.getElementById("opCard").style.display = "block";
+    document.getElementById("restoreCard").style.display = "block";
+    state.path = [["root","根目录"]];
+    renderCrumb();
+    renderFolders(r.root || []);
+  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+function renderCrumb(){
+  const el = document.getElementById("crumb");
+  el.innerHTML = state.path.map((p,i)=> '<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+  el.querySelectorAll("a").forEach(a=>{
+    a.onclick = async () => {
+      const i = +a.dataset.i;
+      state.path = state.path.slice(0, i+1);
+      state.currentParent = state.path[i][0];
+      const r = await api({ action:"list", parent: state.currentParent });
+      dbg(r); renderFolders(r.items||[]); renderCrumb();
+    };
+  });
+}
+
+async function renderFolders(items){
+  const el = document.getElementById("folders");
+  el.innerHTML = "";
+  (items||[]).forEach(it=>{
+    if (it.type !== "folder") return;
+    const d = document.createElement("span");
+    d.className = "folder";
+    d.textContent = "📁 " + it.name;
+    d.onclick = async () => {
+      state.currentParent = it.fileId;
+      state.path.push([it.fileId, it.name]);
+      const r = await api({ action:"list", parent: it.fileId });
+      dbg(r); renderFolders(r.items||[]); renderCrumb();
+    };
+    el.appendChild(d);
+  });
+  if (!el.children.length) el.innerHTML = '<span class="muted">（此文件夹内没有子文件夹）</span>';
+}
+
+document.getElementById("useFolderBtn").onclick = () => {
+  state.selectedRoot = state.currentParent;
+  state.selectedName = state.path[state.path.length-1][1];
+  document.getElementById("selFolderName").textContent = "已选定：" + state.selectedName + "（" + state.selectedRoot + "）";
+};
+
+document.getElementById("planBtn").onclick = async () => {
+  const msg = document.getElementById("planMsg");
+  msg.innerHTML = "分析中（可能要遍历很多文件，请稍候）…";
+  const r = await api({ action:"plan", root: state.selectedRoot });
+  dbg(r);
+  if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+  let s = '可生成 .cas：<b>'+r.can_count+'</b> 个；跳过（云端无 SHA256）：<b>'+r.skip_count+'</b> 个。<br>';
+  if (r.skip && r.skip.length){
+    s += '<span class="muted">跳过样例：'+r.skip.slice(0,10).map(x=>esc(x.name)).join("、")+(r.skip.length>10?" …":"")+'</span>';
+  }
+  msg.innerHTML = s;
+};
+
+document.getElementById("convertBtn").onclick = async () => {
+  const del = document.getElementById("delChk").checked;
+  const msg = document.getElementById("convMsg");
+  msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
+  const r = await api({ action:"convert", root: state.selectedRoot, delete_source: del });
+  dbg(r);
+  if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+  let ok=0, skip=0, err=0;
+  (r.results||[]).forEach(x=>{ if(x.status==="uploaded") ok++; else if(x.status==="skipped_no_sha256") skip++; else if(x.status==="upload_failed") err++; });
+  msg.innerHTML = '<span class="ok">完成：上传 .cas '+ok+' 个，跳过 '+skip+' 个'+(err?'，上传失败 '+err+' 个':'')+(del?'，已删除原视频':'（原视频保留在云盘）')+'</span><br><span class="muted">.cas 已上传到原视频所在的云盘文件夹，去云盘确认一下是否出现</span>';
+  renderRecords(r.results||[]);
+};
+
+function renderRecords(results){
+  const tb = document.querySelector("#recTable tbody");
+  tb.innerHTML = "";
+  results.filter(x=>x.status==="uploaded").forEach(x=>{
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(x.size)+'</td>';
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.textContent = "恢复";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "恢复中…";
+      const r = await api({ action:"restore", sha256:x.sha256, size:x.size, name:x.name.replace(/\.cas$/,""), parent:x.parent });
+      dbg(r);
+      b.textContent = r.ok ? "已恢复 ✔" : "失败";
+      if(!r.ok) b.disabled=false;
+    };
+    td.appendChild(b); tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+  if(!tb.children.length) tb.innerHTML = '<tr><td colspan="3" class="muted">暂无记录</td></tr>';
+}
+</script>
+</body>
+</html>

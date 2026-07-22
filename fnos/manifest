@@ -1,0 +1,6 @@
+[app]
+appname=casgen
+version=1.0.0
+display_name=网盘影视转CAS瘦身工具
+platform=all
+service_port=5000

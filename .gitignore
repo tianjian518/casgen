@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+casgen_debug.log
+.DS_Store
+*.fpk
