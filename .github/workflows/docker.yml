@@ -2,9 +2,14 @@ name: Build and push image to Docker Hub
 
 # 推送代码到 main 分支（或手动触发）后，自动构建 Docker 镜像并推到你的 Docker Hub。
 # 不需要本地装 Docker。镜像地址： docker.io/<你的DockerHub用户名>/casgen:latest
+# 仅改文档/许可证时不触发构建（paths-ignore）。
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '**.md'
   workflow_dispatch:
 
 permissions:
