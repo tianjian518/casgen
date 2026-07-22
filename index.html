@@ -77,8 +77,20 @@
   <p class="muted">粘贴别人的 139 分享链接即可，提取码会自动从链接里识别，不用分开填。</p>
   <label>分享链接（可连提取码一起粘贴）</label>
   <textarea id="shareText" rows="3" placeholder="例如：https://yun.139.com/shareweb/#/w/i/2qidG1XEkUKi0 提取码:d78q"></textarea>
-  <label>转存到我云盘的目录（留空=根目录；可填目录名或路径，如 分享转存 或 /电影/分享）</label>
-  <input type="text" id="shareTarget" placeholder="如：分享转存（留空则存到根目录）">
+  <label>转存到我云盘的目录（留空=根目录；可手动填路径，或点 📁 浏览选择已有目录）</label>
+  <div class="row">
+    <input type="text" id="shareTarget" placeholder="如：分享转存（留空则存到根目录）" style="flex:1">
+    <button type="button" id="shareBtn" class="sec">📁 浏览</button>
+  </div>
+  <div id="sharePicker" class="card" style="display:none; margin-top:8px; padding:12px;">
+    <div class="crumb" id="shareCrumb"></div>
+    <div id="shareFolders"></div>
+    <div class="row">
+      <button type="button" id="shareUse" class="sec">✔ 选定此目录</button>
+      <button type="button" id="shareCancel" class="sec">取消</button>
+      <span id="shareCur" class="muted"></span>
+    </div>
+  </div>
   <div class="checks" style="margin:10px 0">
     <label style="display:block;margin:5px 0"><input type="checkbox" id="shareAutoCas"> 转存后自动生成 CAS（一条龙，省一步）</label>
     <label style="display:block;margin:5px 0"><input type="checkbox" id="shareDeleteSrc" disabled> 生成 CAS 后删除原视频（勾选上面才生效）</label>
@@ -495,6 +507,63 @@ async function doRename(dry){
 }
 document.getElementById("renamePreviewBtn").onclick = () => doRename(true);
 document.getElementById("renameExecBtn").onclick = () => doRename(false);
+
+// ---------- 通用目录选择器（分享转存的目标目录，像第 2 步那样点选） ----------
+// 选中后把路径拼成字符串填回输入框；后端 resolve_folder 按 / 逐级 find_or_create，无需改后端。
+function mountFolderPicker(prefix, targetInputId){
+  let pick = { currentParent:"root", path:[["root","根目录"]] };
+  const picker = document.getElementById(prefix+"Picker");
+  const crumb = document.getElementById(prefix+"Crumb");
+  const folders = document.getElementById(prefix+"Folders");
+  const cur = document.getElementById(prefix+"Cur");
+  const input = document.getElementById(targetInputId);
+  function renderCrumb(){
+    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+    crumb.querySelectorAll("a").forEach(a=>{
+      a.onclick = async () => {
+        const i = +a.dataset.i;
+        pick.path = pick.path.slice(0, i+1);
+        pick.currentParent = pick.path[i][0];
+        const r = await api({ action:"list", parent: pick.currentParent });
+        dbg(r); renderFolders(r.items||[]); renderCrumb();
+      };
+    });
+  }
+  async function renderFolders(items){
+    folders.innerHTML = "";
+    (items||[]).forEach(it=>{
+      if (it.type !== "folder") return;
+      const d = document.createElement("span");
+      d.className = "folder";
+      d.textContent = "📁 " + it.name;
+      d.onclick = async () => {
+        pick.currentParent = it.fileId;
+        pick.path.push([it.fileId, it.name]);
+        const r = await api({ action:"list", parent: it.fileId });
+        dbg(r); renderFolders(r.items||[]); renderCrumb();
+      };
+      folders.appendChild(d);
+    });
+    if (!folders.children.length) folders.innerHTML = '<span class="muted">（此文件夹内没有子文件夹）</span>';
+  }
+  document.getElementById(prefix+"Btn").onclick = async () => {
+    picker.style.display = "block";
+    pick = { currentParent:"root", path:[["root","根目录"]] };
+    const r = await api({ action:"list", parent:"root" });
+    dbg(r); renderFolders(r.items||[]); renderCrumb();
+    if (cur) cur.textContent = "";
+  };
+  document.getElementById(prefix+"Use").onclick = () => {
+    const parts = pick.path.slice(1).map(p=>p[1]);  // 去掉 root
+    input.value = parts.join("/");                   // 空字符串=根目录
+    if (cur) cur.textContent = "已选：" + (parts.join("/") || "根目录");
+    picker.style.display = "none";
+  };
+  document.getElementById(prefix+"Cancel").onclick = () => {
+    picker.style.display = "none";
+  };
+}
+mountFolderPicker("share", "shareTarget");
 
 </script>
 </body>
