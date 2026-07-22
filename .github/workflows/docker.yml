@@ -1,21 +1,10 @@
 name: Build and push image to Docker Hub
 
-# 推送代码到 main 分支，或推送 v* 标签（如 v2.0.0、v1.0.0）后，自动构建多架构 Docker 镜像并推到 Docker Hub。
-# 不需要本地装 Docker。镜像地址： docker.io/<你的DockerHub用户名>/casgen
-# 支持架构：linux/amd64（x86_64）、linux/arm64（ARM 64 位）、linux/arm/v7（32 位 ARM 老设备）
-# 标签策略：
-#   - 推到 main        → :latest（始终指向最新的主分支代码）
-#   - 推标签 v2.0.0    → :2.0.0 与 :2.0
-#   - 推标签 v1.0.0    → :1.0.0 与 :1.0（历史版本固化，不覆盖）
-# 仅改文档/许可证时不触发构建（paths-ignore）。
+# v1.0.0 锁定版构建：只推 :1.0 与 :1.0.0，刻意不碰 :latest（:latest 由 main 分支维护为最新 2.0）。
+# 触发条件：仅推送 v1.0.0 标签，或手动 workflow_dispatch。
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-    paths-ignore:
-      - 'README.md'
-      - 'LICENSE'
-      - '**.md'
+    tags: ['v1.0.0']
   workflow_dispatch:
 
 permissions:
@@ -46,7 +35,6 @@ jobs:
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/casgen
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 

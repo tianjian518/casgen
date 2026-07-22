@@ -24,15 +24,9 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-# 视频扩展名白名单：generate 只转这些，避免误转图片/文本，并根治 .cas 后缀叠加 bug
-VIDEO_EXT = {
-    ".mp4", ".mkv", ".ts", ".avi", ".mov", ".flv", ".wmv",
-    ".rmvb", ".mpg", ".mpeg", ".m4v", ".webm", ".3gp", ".vob",
-}
-
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
-__version__ = "2.0.0"
+__version__ = "2026-07-22b"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -358,7 +352,7 @@ class Yun139:
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": cas_name,
             "type": "file",
-            "fileRenameMode": "overwrite",  # [2.0 修复] 覆盖同名 .cas，避免重复转换生成两份
+            "fileRenameMode": "auto_rename",
         }
         resp = self.personal_post("/file/create", body)
         if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
@@ -476,19 +470,11 @@ class Yun139:
         for it in self.iter_all(root):
             if self._is_folder(it):
                 continue
-            name = self._name(it)
-            # [2.0 修复] 只转视频白名单，跳过 .cas（根治后缀叠加）/ 非视频
-            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-            if ext == ".cas":
-                results.append({"name": name, "status": "skipped_cas"})
-                continue
-            if ext not in VIDEO_EXT:
-                results.append({"name": name, "status": "skipped_non_video"})
-                continue
             sha = self.sha256_of(it)
             if not sha:
-                results.append({"name": name, "status": "skipped_no_sha256"})
+                results.append({"name": self._name(it), "status": "skipped_no_sha256"})
                 continue
+            name = self._name(it)
             # 父目录必须是文件夹 fileId：优先用 iter_all 注入的 _parent（当前所在文件夹），
             # 再退而求其次用 139 列表项自带的 parentFileId / parentId；最后退回 root。
             # 注意：绝不能用 self._fid(it)（那是文件自己的 ID），否则 file/create 报 00010002。
@@ -527,31 +513,3 @@ class Yun139:
             dresp = self.delete(to_delete)
             results.append({"name": f"[已删除 {len(to_delete)} 个原视频]", "status": "deleted", "detail": dresp})
         return results
-
-    # ---------- [2.0] 分享转存：目标目录解析 ----------
-    def find_or_create_folder(self, name, parent="root"):
-        """在 parent 下找同名文件夹，没有就创建，返回其 catalogID（未实测，需真机验证）。"""
-        items, _, _ = self.list_dir(parent)
-        for it in items:
-            if self._is_folder(it) and self._name(it) == name:
-                return self._fid(it)
-        body = {
-            "parentFileId": parent if parent not in ("root", "/") else "/",
-            "name": name,
-            "type": "folder",
-            "fileRenameMode": "overwrite",
-        }
-        d = self.personal_post("/file/create", body)
-        dd = d.get("data") if isinstance(d, dict) else None
-        return (dd or {}).get("fileId") or d.get("fileId")
-
-    def resolve_folder(self, target):
-        """把用户输入的目录名/路径（如 '分享转存' 或 '/电影/分享'）解析成 catalogID。
-        空或 root 返回 'root'；多级路径逐级 find_or_create。"""
-        target = (target or "").strip()
-        if not target or target in ("root", "/"):
-            return "root"
-        cur = "root"
-        for part in [t for t in target.split("/") if t]:
-            cur = self.find_or_create_folder(part, cur)
-        return cur

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>网盘影视 转 CAS 瘦身工具 v2.0.0</title>
+<title>网盘影视 转 CAS 瘦身工具 v2026-07-22b</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
@@ -67,22 +67,6 @@
   <div id="convMsg"></div>
 </div>
 
-<!-- [2.0 新增] 分享链接一条龙 -->
-<div class="card" id="shareCard" style="display:none">
-  <h3>📥 分享链接一条龙（别人的 139 分享 → 转存到我的云盘）</h3>
-  <p class="muted">粘贴别人的 139 分享链接即可，提取码会自动从链接里识别，不用分开填。</p>
-  <label>分享链接（可连提取码一起粘贴）</label>
-  <textarea id="shareText" rows="3" placeholder="例如：https://yun.139.com/shareweb/#/w/i/2qidG1XEkUKi0 提取码:d78q"></textarea>
-  <label>转存到我云盘的目录（留空=根目录；可填目录名或路径，如 分享转存 或 /电影/分享）</label>
-  <input type="text" id="shareTarget" placeholder="如：分享转存（留空则存到根目录）">
-  <div class="row">
-    <button id="shareParseBtn">① 解析并列出视频</button>
-    <button id="shareSaveBtn" class="sec">② 转存视频到我云盘</button>
-  </div>
-  <div id="shareMsg"></div>
-  <table id="shareTable"><thead><tr><th>视频文件</th><th>大小</th></tr></thead><tbody></tbody></table>
-</div>
-
 <!-- 步骤4：恢复播放 -->
 <div class="card" id="restoreCard" style="display:none">
   <h3>第 4 步：从 .cas 恢复播放</h3>
@@ -121,8 +105,6 @@ document.getElementById("loginBtn").onclick = async () => {
     document.getElementById("browseCard").style.display = "block";
     document.getElementById("opCard").style.display = "block";
     document.getElementById("restoreCard").style.display = "block";
-    document.getElementById("shareCard").style.display = "block";
-    try { localStorage.setItem("casgen_auth", auth); localStorage.setItem("casgen_prov", prov); } catch(e){}
     state.path = [["root","根目录"]];
     renderCrumb();
     renderFolders(r.root || []);
@@ -181,7 +163,7 @@ document.getElementById("planBtn").onclick = async () => {
   msg.innerHTML = s;
 };
 
-document.getElementById("conn").onclick = async () => {
+document.getElementById("convertBtn").onclick = async () => {
   const del = document.getElementById("delChk").checked;
   const msg = document.getElementById("convMsg");
   msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
@@ -215,60 +197,6 @@ function renderRecords(results){
   });
   if(!tb.children.length) tb.innerHTML = '<tr><td colspan="3" class="muted">暂无记录</td></tr>';
 }
-
-// ---------- [2.0] 分享链接一条龙 ----------
-document.getElementById("shareParseBtn").onclick = async () => {
-  const text = document.getElementById("shareText").value;
-  const msg = document.getElementById("shareMsg");
-  msg.innerHTML = "解析中…";
-  try {
-    const r = await api({ action:"share_parse", text });
-    dbg(r);
-    if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
-    msg.innerHTML = '<span class="ok">解析成功：共 '+r.count+' 个视频'+(r.needPwd?'（已自动识别提取码）':'')+(r.linkName?'，分享名：'+esc(r.linkName):'')+'</span>';
-    const tb = document.querySelector("#shareTable tbody"); tb.innerHTML="";
-    (r.files||[]).forEach(f=>{
-      const tr=document.createElement("tr");
-      tr.innerHTML='<td>'+esc(f.contentName)+'</td><td>'+esc(f.contentSize)+'</td>';
-      tb.appendChild(tr);
-    });
-    if(!tb.children.length) tb.innerHTML='<tr><td colspan="2" class="muted">没有视频文件</td></tr>';
-  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
-};
-
-document.getElementById("shareSaveBtn").onclick = async () => {
-  const text = document.getElementById("shareText").value;
-  const target = document.getElementById("shareTarget").value;
-  const msg = document.getElementById("shareMsg");
-  msg.innerHTML = "转存中…";
-  try {
-    const r = await api({ action:"share_save", text, target });
-    dbg(r);
-    if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
-    msg.innerHTML = '<span class="ok">已转存 '+r.saved+' 个视频到我云盘目录（catalogID='+esc(r.targetCatalog)+'）</span>';
-  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
-};
-
-// ---------- [2.0] 登录持久化：刷新后自动从 localStorage 重登 ----------
-window.addEventListener("load", () => {
-  const saved = localStorage.getItem("casgen_auth");
-  if (!saved) return;
-  document.getElementById("auth").value = saved;
-  const prov = localStorage.getItem("casgen_prov") || "139";
-  const rb = document.querySelector('input[name=prov][value="'+prov+'"]');
-  if (rb) rb.checked = true;
-  api({ action:"login", provider:prov, authorization:saved }).then(rr=>{
-    dbg(rr);
-    if (!rr.ok) return;
-    if (rr.version) document.getElementById("ver").textContent = "v"+rr.version;
-    document.getElementById("loginMsg").innerHTML = '<span class="ok">已自动登录 ✔（从本地缓存恢复）</span>';
-    document.getElementById("browseCard").style.display="block";
-    document.getElementById("opCard").style.display="block";
-    document.getElementById("restoreCard").style.display="block";
-    document.getElementById("shareCard").style.display="block";
-    state.path=[["root","根目录"]]; renderCrumb(); renderFolders(rr.root||[]);
-  });
-});
 </script>
 </body>
 </html>

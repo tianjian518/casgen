@@ -13,8 +13,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from yidong import Yun139, __version__ as VERSION
-from share139 import (parse_share_input, get_share_info, list_all_share_files,
-                      save_share_files, ShareError)
 # from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
@@ -126,47 +124,6 @@ class H(BaseHTTPRequestHandler):
             RECORDS = [r for r in res if r.get("status") == "uploaded"]
             _log_debug("convert", res)
             return self._json({"ok": True, "version": VERSION, "results": res})
-
-        # ---------- [2.0] 分享链接一条龙 ----------
-        if action == "share_parse":
-            text = (p.get("text") or "").strip()
-            link_id, pwd = parse_share_input(text)
-            if not link_id:
-                return self._json({"ok": False,
-                                    "error": "未能从输入中解析出分享链接ID（形如 https://yun.139.com/shareweb/#/w/i/xxxx）"})
-            try:
-                info = get_share_info(link_id, pwd, token=CLIENT.token)
-                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
-            except ShareError as e:
-                return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
-            except Exception as e:
-                return self._json({"ok": False, "error": "解析分享失败：" + str(e)})
-            return self._json({
-                "ok": True, "linkID": link_id, "needPwd": bool(pwd),
-                "linkName": (info or {}).get("lkName", ""),
-                "expireTime": (info or {}).get("expireTime", ""),
-                "files": files, "count": len(files),
-            })
-
-        if action == "share_save":
-            text = (p.get("text") or "").strip()
-            target = (p.get("target") or "root").strip() or "root"
-            link_id, pwd = parse_share_input(text)
-            if not link_id:
-                return self._json({"ok": False, "error": "未能解析出分享链接ID"})
-            try:
-                target_catalog = CLIENT.resolve_folder(target)
-                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
-                co_paths = [f["path"] for f in files]
-                ca_paths = []  # 当前只转存视频文件，不递归转存子目录
-                res = save_share_files(link_id, co_paths, ca_paths, target_catalog,
-                                       need_password=bool(pwd), token=CLIENT.token)
-            except ShareError as e:
-                return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
-            except Exception as e:
-                return self._json({"ok": False, "error": "转存失败：" + str(e)})
-            return self._json({"ok": True, "targetCatalog": target_catalog,
-                               "saved": len(co_paths), "result": res})
 
         if action == "restore":
             sha = p.get("sha256")
