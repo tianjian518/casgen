@@ -7,8 +7,8 @@
 
 ## ⚠️ 先看这 3 条重要说明（避免翻车）
 
-1. **本程序是纯标准库写的，不依赖 Docker、不依赖 pip。** 只要电脑/盒子里有 Python3 就能跑；用 Docker 则连 Python 都不用装。
-2. **接口是逆向推测、未真机实测。** 移动139 的接口路径/字段基于光鸭版 OpenList 139 驱动推测。
+1. **本程序是纯标准库写的，不依赖 Docker、不依赖 pip。** 只要设备里有 Python3 就能跑；用 Docker 则连 Python 都不用装。
+2. **接口是逆向推测、未真机实测。** 移动139 的接口路径/字段基于公开逆向分析推测，可能与官方实际实现有出入。
    如果运行报错，网页右下角"原始接口返回"会显示真实返回，可据此对照 `yidong.py` 顶部的接口路径（`list_path` 等）自行核对；如需协助请在仓库提 Issue 反馈。
 3. **CAS 不是备份。** 它依赖网盘底层的"去重池"——热门影视云端有副本，删索引留数据，恢复=秒传建引用；
    **冷门/独一份的文件去重池可能没有，删了就真丢了。** 建议先拿一部热门电影试，确认能恢复再批量删。
@@ -21,7 +21,7 @@
 
 > 如果你用 **Docker 部署（见第七节）**，这步和下面的 Python 启动都不需要，跳过即可。
 
-打开终端（统信叫"终端"，N1 用 SSH 或飞牛的终端），输入：
+打开终端（Linux 用系统终端，Windows 用 PowerShell 或命令提示符），输入：
 
 ```
 python3 --version
@@ -29,18 +29,18 @@ python3 --version
 
 - 显示 `Python 3.x` → 已有，跳过下一步。
 - 提示找不到命令 → 安装：
-  - 统信 UOS：`sudo apt install python3`
-  - 飞牛 N1（Debian）：`sudo apt update && sudo apt install python3`
+  - Debian / Ubuntu 系：`sudo apt install python3`
+  - 其它 Debian 系：`sudo apt update && sudo apt install python3`
 
-> 注意：这里用的是系统自带的 `apt` 源（国内能连），**不是 pip、不是 Docker**，所以不受网络报错影响。
+> 注意：这里用的是系统自带的 `apt` 源（国内通常可直连），**不是 pip、不是 Docker**，所以不受网络报错影响。
 
 ---
 
 ## 二、把程序放到机器上
 
 把 `casgen` 这个文件夹整体拷过去：
-- **在统信上直接跑（最简单）**：下载下面的压缩包，解压到任意目录（比如 `桌面/casgen`）。
-- **在 N1 上跑**：把 `casgen` 文件夹用飞牛的"文件管理"传到盒子里的某个目录（比如 `/vol1/1000/casgen`）。
+- **在本机直接跑（最简单）**：下载仓库的源码压缩包，解压到任意目录（比如 `casgen`）。
+- **在其它设备上跑**：把 `casgen` 文件夹传到目标机器的某个目录（比如 `/opt/casgen`）。
 
 文件夹里只需这 4 个文件：`app.py`、`yidong.py`、`index.html`、`README.md`。
 
@@ -48,16 +48,16 @@ python3 --version
 
 ## 三、启动（两种方式，任选其一）
 
-### 方式 A：统信本机直接跑（推荐，最省事）
-1. 终端进入文件夹：`cd 桌面/casgen`（路径按你实际解压位置改）
+### 方式 A：本机直接跑（推荐，最省事）
+1. 终端进入文件夹：`cd casgen`（路径按你实际解压位置改）
 2. 启动：`python3 app.py`
 3. 浏览器打开：`http://localhost:5000`
 
-### 方式 B：在 N1 盒子上跑，用统信的浏览器访问
-1. 在 N1 终端进入文件夹：`cd /vol1/1000/casgen`
+### 方式 B：在另一台设备上跑，用本机浏览器访问
+1. 在目标设备终端进入文件夹：`cd /opt/casgen`
 2. 启动：`python3 app.py`
-3. 在统信的浏览器打开：`http://N1的IP:5000`
-   （N1 的 IP 在飞牛后台能看到，例如 `http://192.168.1.50:5000`）
+3. 在另一台设备的浏览器打开：`http://目标设备IP:5000`
+   （目标设备 IP 在路由器或系统网络设置里能查到，例如 `http://192.168.1.50:5000`）
 
 > 启动后终端会显示"CAS 转换服务已启动"。要停止就按 `Ctrl+C`。
 
@@ -92,35 +92,28 @@ python3 --version
 
 ---
 
-## 七、用 Docker 部署（飞牛 FnOS / 群晖 / 任意 Linux 盒子通用 —— 推荐）
+## 七、用 Docker 部署（飞牛 FnOS / 群晖 / 任意支持 Docker 的设备 —— 推荐）
 
-镜像由本仓库的 **GitHub Actions 自动构建并推到 Docker Hub**，所以你在飞牛 Docker 的「镜像仓库」里就能直接搜到，不用装 Python、不用管依赖。
+镜像由本仓库的 **GitHub Actions 自动构建并公开推到 Docker Hub**，所以你在支持 Docker 的设备上就能直接拉取运行，不用装 Python、不用管依赖。
 
 ### 路线 A：飞牛 FnOS Docker「镜像仓库」直接搜到安装（推荐路线）
 1. 飞牛应用中心装好「Docker」应用（系统自带）。
 2. 打开 Docker → **镜像仓库** → 搜索 `tianjian518/casgen`
-   （把前缀 `tianjian518` 换成**你自己的 Docker Hub 用户名**；注册/获取见下方"Docker Hub 账号"）。
+   （镜像由本仓库维护者构建并公开托管，直接搜这个名字即可）。
 3. 搜到后点「拉取」，等进度条走完。
 4. 切到「容器」→「创建容器」→ 镜像选刚拉取的 `tianjian518/casgen` →
    **端口映射**填：容器端口 `5000` → 主机端口 `5000` → 确定。
 5. 浏览器打开 `http://飞牛IP:5000` 即可用。
 
-> 第一次把代码推到 GitHub 后，约 1~2 分钟镜像才在 Docker Hub 就绪；之后每次推代码会自动重新构建。
+> 镜像由仓库维护者在每次发布时自动构建，通常 1~2 分钟即就绪；面向使用者无需关心构建过程，直接拉取使用即可。
 
-### 路线 B：用 docker compose（电脑/盒子命令行均可）
+### 路线 B：用 docker compose（电脑/设备命令行均可）
 把本仓库的 `docker-compose.yml` 放到任意目录，执行：
 ```bash
 docker compose up -d        # 直接拉 Docker Hub 镜像运行
 # 或本地从源码构建： docker compose up -d --build
 ```
 浏览器开 `http://IP:5000`。
-
-### Docker Hub 账号（镜像就推在这里）
-- 注册：打开 hub.docker.com → Sign up，Docker ID 建议全小写英文（这就是镜像名前缀）。
-  也可直接「Continue with GitHub」用 GitHub 登录（Docker ID 会等于你的 GitHub 用户名）。
-- 生成推送令牌：头像 → Account settings → Security → New Access Token（权限 Read & Write）。
-- 本仓库的 GitHub Actions 用 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 两个仓库密钥把镜像推上去，
-  密钥由仓库维护者在 GitHub 仓库 Settings → Secrets 里配置，令牌用完可随时删除。
 
 ---
 
@@ -134,7 +127,7 @@ casgen/  （仓库根目录）
 ├── README.md                         # 使用说明
 ├── LICENSE                           # MIT
 ├── Dockerfile                        # 镜像构建
-├── docker-compose.yml                # 飞牛/任意 Docker 运行
+├── docker-compose.yml                # 任意 Docker 运行
 └── .github/workflows/docker.yml      # 推 main 自动构建并推到 Docker Hub
 ```
 
@@ -143,5 +136,4 @@ casgen/  （仓库根目录）
 
 安全提醒：
 - **CAS 不是备份**，冷门/独一份的文件删了可能真丢，先拿热门影视试。
-- 不要公开分享你的移动云盘 `Authorization`，它会让你登录态泄露。
-- 部署用的 GitHub PAT / Docker Hub Token 都是"钥匙"，部署完成后请到对应网站删掉（revoke），别长期留着。
+- 不要公开分享你的移动云盘 `Authorization`，它会让你的登录态泄露。
