@@ -1,12 +1,17 @@
 name: Build and push image to Docker Hub
 
-# 推送代码到 main 分支（或手动触发）后，自动构建多架构 Docker 镜像并推到你的 Docker Hub。
-# 不需要本地装 Docker。镜像地址： docker.io/<你的DockerHub用户名>/casgen:latest
-# 支持架构：linux/amd64（x86_64）、linux/arm64（ARM 64 位，如飞牛 ARM / N1 / 树莓派 4·5）、linux/arm/v7（32 位 ARM 老设备）
+# 推送代码到 main 分支，或推送 v* 标签（如 v2.0.0、v1.0.0）后，自动构建多架构 Docker 镜像并推到 Docker Hub。
+# 不需要本地装 Docker。镜像地址： docker.io/<你的DockerHub用户名>/casgen
+# 支持架构：linux/amd64（x86_64）、linux/arm64（ARM 64 位）、linux/arm/v7（32 位 ARM 老设备）
+# 标签策略：
+#   - 推到 main        → :latest（始终指向最新的主分支代码）
+#   - 推标签 v2.0.0    → :2.0.0 与 :2.0
+#   - 推标签 v1.0.0    → :1.0.0 与 :1.0（历史版本固化，不覆盖）
 # 仅改文档/许可证时不触发构建（paths-ignore）。
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths-ignore:
       - 'README.md'
       - 'LICENSE'
@@ -35,10 +40,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/casgen
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/casgen:latest
+          tags: ${{ steps.meta.outputs.tags }}
