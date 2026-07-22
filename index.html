@@ -118,6 +118,33 @@
   <table id="recTable"><thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead><tbody></tbody></table>
 </div>
 
+<!-- [4.0] 生成 Strm 文件（播放直链） -->
+<div class="card" id="strmCard" style="display:none">
+  <h3>第 5 步：生成 Strm 文件（播放直链）</h3>
+  <p class="muted">.cas 是瘦身文件，播放器读不懂。这里为每个 .cas 在<b>同目录</b>生成一个同名 .strm（里面是一行 casgen 网关地址）。把 .strm 挂到网易爆米花 / 飞牛影视，即可直连 139 播放，无需 OpenList。</p>
+  <label>casgen 网关对外地址（播放器能访问到的 http://IP:端口，如 http://192.168.1.100:5000）</label>
+  <input type="text" id="casgenPublicUrl" placeholder="http://你的IP:5000">
+  <div class="row">
+    <button id="genStrmBtn">① 生成 Strm（基于第 2 步选定的文件夹）</button>
+  </div>
+  <p class="muted">会遍历所选文件夹下所有 .cas，逐个生成 .strm。.strm 内容形如：<code>http://IP:5000/cas/电影/流浪地球2.cas</code></p>
+  <div id="strmMsg"></div>
+  <table id="strmTable"><thead><tr><th>文件名</th><th>结果</th><th>直链</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- [4.0] L1 本地正则重命名 -->
+<div class="card" id="renameCard" style="display:none">
+  <h3>第 6 步：L1 本地重命名（去水印 / 统一季集）</h3>
+  <p class="muted">零联网、零依赖，只改 <b>.cas 的显示名</b>（不影响恢复播放）。把当前文件夹下所有 .cas 整理成标准名：去发布组/网站水印，统一「第X集→E01」「1x01→S01E01」。建议先<b>预览</b>确认，再<b>执行</b>。</p>
+  <div class="row">
+    <button id="renamePreviewBtn">① 预览改名</button>
+    <button id="renameExecBtn">② 执行改名</button>
+  </div>
+  <p class="muted">预览只显示「原名 → 新名」，不改云盘；执行才真正改 139 上的文件名。</p>
+  <div id="renameMsg"></div>
+  <table id="renameTable"><thead><tr><th>原名</th><th></th><th>新名</th><th>结果</th></tr></thead><tbody></tbody></table>
+</div>
+
 <!-- 调试区 -->
 <div class="card">
   <details>
@@ -137,7 +164,7 @@ async function checkAuth(){
     hideAuthBanner();
     if(d && d.loggedIn){
       // 后端已恢复登录态（持久化），自动展开工作区，刷新页面也不丢
-      ["browseCard","opCard","restoreCard","shareCard","monitorCard"].forEach(id=>{
+      ["browseCard","opCard","restoreCard","shareCard","monitorCard","strmCard","renameCard"].forEach(id=>{
         const el=document.getElementById(id); if(el) el.style.display="block";
       });
       loadMonitors();
@@ -180,6 +207,8 @@ document.getElementById("loginBtn").onclick = async () => {
     document.getElementById("opCard").style.display = "block";
     document.getElementById("restoreCard").style.display = "block";
     document.getElementById("shareCard").style.display = "block";
+    document.getElementById("strmCard").style.display = "block";
+    document.getElementById("renameCard").style.display = "block";
     try { localStorage.setItem("casgen_auth", auth); localStorage.setItem("casgen_prov", prov); } catch(e){}
     state.path = [["root","根目录"]];
     renderCrumb();
@@ -338,6 +367,7 @@ window.addEventListener("load", () => {
     document.getElementById("opCard").style.display="block";
     document.getElementById("restoreCard").style.display="block";
     document.getElementById("shareCard").style.display="block";
+    document.getElementById("strmCard").style.display="block";
     state.path=[["root","根目录"]]; renderCrumb(); renderFolders(rr.root||[]);
   });
 });
@@ -407,6 +437,64 @@ document.getElementById("monAddBtn").onclick = async () => {
     loadMonitors();
   }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
 };
+
+// ---------- [4.0] 生成 Strm 文件（播放直链） ----------
+// 页面加载时回填上次填写的网关地址
+try { const u = localStorage.getItem("casgen_public_url"); if(u) document.getElementById("casgenPublicUrl").value = u; } catch(e){}
+document.getElementById("genStrmBtn").onclick = async () => {
+  const url = document.getElementById("casgenPublicUrl").value.trim();
+  if(!url){ document.getElementById("strmMsg").innerHTML='<span class="err">请先填写 casgen 网关地址</span>'; return; }
+  try{ localStorage.setItem("casgen_public_url", url); }catch(e){}
+  const root = state.selectedRoot || "root";
+  const msg = document.getElementById("strmMsg");
+  msg.innerHTML = "生成中（遍历选定文件夹下所有 .cas）…";
+  try{
+    const r = await api({ action:"generate_strm", root: root, publicUrl: url });
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    msg.innerHTML = '<span class="ok">完成 ✔ 共 '+r.count+' 个 .cas，成功生成 '+r.uploaded+' 个 .strm</span>'+
+                    (r.publicUrl?' <span class="muted">网关='+esc(r.publicUrl)+'</span>':'');
+    const tb = document.querySelector("#strmTable tbody"); tb.innerHTML="";
+    (r.results||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      const st = x.status==="uploaded" ? '<span class="ok">✔ 已生成</span>' : '<span class="err">✘ '+esc(x.error||"失败")+'</span>';
+      const link = x.status==="uploaded" ? '<code>'+esc(x.url)+'</code>' : '';
+      tr.innerHTML = "<td>"+esc(x.name)+"</td><td>"+st+"</td><td>"+link+"</td>";
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="3" class="muted">没有 .cas 文件可生成</td></tr>';
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+// ---------- [4.0] L1 本地正则重命名 ----------
+async function doRename(dry){
+  const root = state.selectedRoot || "root";
+  const msg = document.getElementById("renameMsg");
+  msg.innerHTML = dry ? "预览中（只读，不改云盘）…" : "改名中…";
+  try{
+    const r = await api({ action:"rename_l1", root: root, dryRun: dry });
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    if(dry){
+      msg.innerHTML = '<span class="ok">预览完成 ✔ 共 '+(r.renamed+r.skipped+r.failed)+' 个 .cas，其中可改名 '+(r.renamed)+' 个（未改云盘）</span>';
+    } else {
+      msg.innerHTML = '<span class="ok">完成 ✔ 改名 '+(r.renamed)+' 个，跳过 '+(r.skipped)+' 个，失败 '+(r.failed)+' 个</span>';
+    }
+    const tb = document.querySelector("#renameTable tbody"); tb.innerHTML="";
+    (r.results||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      const st = x.status==="renamed" ? '<span class="ok">✔ 已改</span>'
+               : x.status==="skip" ? '<span class="muted">— 无需改</span>'
+               : x.status==="preview" ? '<span class="muted">待执行</span>'
+               : '<span class="err">✘ '+esc(x.error||"失败")+'</span>';
+      tr.innerHTML = "<td>"+esc(x.old)+"</td><td>→</td><td>"+esc(x.new)+"</td><td>"+st+"</td>";
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="4" class="muted">没有 .cas 文件</td></tr>';
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+}
+document.getElementById("renamePreviewBtn").onclick = () => doRename(true);
+document.getElementById("renameExecBtn").onclick = () => doRename(false);
 
 </script>
 </body>

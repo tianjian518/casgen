@@ -9,6 +9,8 @@
 import json
 import os
 import sys
+import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +19,7 @@ from share139 import (parse_share_input, get_share_info, list_all_share_files,
                       save_share_files, ShareError)
 import monitor
 import monitor_store
+import rename
 # from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
@@ -83,8 +86,53 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/cas/"):
+            self.handle_cas(self.path[len("/cas/"):])
         else:
             self._json({"error": "not found"}, 404)
+
+    def handle_cas(self, rel_path):
+        """CAS→Strm 播放网关：/cas/<139相对路径>/<xxx.cas> -> 读.cas -> 秒传恢复 -> 302 直链。
+        播放器（网易爆米花/飞牛影视）读 .strm 里的 URL 命中这里，直连 139 直链播放，不耗 casgen 带宽。"""
+        if CLIENT is None:
+            self._json({"error": "未登录 139 云盘，请先在网页登录"}, 401)
+            return
+        rel_path = urllib.parse.unquote(rel_path)
+        try:
+            cas_fid = CLIENT.resolve_path_readonly(rel_path)
+            cas_name = rel_path.rsplit("/", 1)[-1]
+            url, temp_fid = CLIENT.cas_get_play_link(cas_fid, cas_name)
+        except TokenExpired:
+            global AUTH_EXPIRED
+            AUTH_EXPIRED = True
+            self._json({"error": "登录已失效，请重新登录"}, 401)
+            return
+        except FileNotFoundError as e:
+            self._json({"error": "未找到: %s" % e}, 404)
+            return
+        except Exception as e:
+            self._json({"error": "CAS 播放失败: %s" % e}, 500)
+            return
+        # 302 重定向到 139 直链（播放器直连，不耗 casgen 带宽）
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        # 异步延迟删除临时恢复文件，保住「省空间」核心价值
+        self._schedule_cas_cleanup(temp_fid)
+
+    def _schedule_cas_cleanup(self, temp_fid):
+        if not temp_fid:
+            return
+        delay = int(os.environ.get("CASGEN_CAS_CLEANUP_DELAY", "3600"))
+
+        def _del():
+            try:
+                if CLIENT is not None:
+                    CLIENT.delete([temp_fid])
+            except Exception:
+                pass
+        threading.Timer(delay, _del).start()
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
@@ -165,6 +213,52 @@ class H(BaseHTTPRequestHandler):
             RECORDS = [r for r in res if r.get("status") == "uploaded"]
             _log_debug("convert", res)
             return self._json({"ok": True, "version": VERSION, "results": res})
+
+        # ---------- [4.0] CAS→Strm 批量生成 ----------
+        if action == "generate_strm":
+            root = p.get("root", "root") or "root"
+            public_url = (p.get("publicUrl") or os.environ.get("CASGEN_PUBLIC_URL", "")).strip()
+            try:
+                results = CLIENT.generate_strm(root, public_url)
+                ok_n = sum(1 for r in results if r.get("status") == "uploaded")
+                return self._json({"ok": True, "count": len(results),
+                                   "uploaded": ok_n, "results": results,
+                                   "publicUrl": public_url})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        # ---------- [4.0] L1 本地正则重命名 ----------
+        if action == "rename_l1":
+            root = p.get("root", "root") or "root"
+            dry = bool(p.get("dryRun", False))
+            try:
+                renamed = skipped = failed = 0
+                results = []
+                for rel, it in CLIENT.walk(root):
+                    if not rel.lower().endswith(".cas"):
+                        continue
+                    fid = CLIENT._fid(it)
+                    old = CLIENT._name(it)
+                    new = rename.l1_normalize(old)
+                    if new == old:
+                        skipped += 1
+                        results.append({"old": old, "new": new, "status": "skip"})
+                        continue
+                    if dry:
+                        renamed += 1
+                        results.append({"old": old, "new": new, "status": "preview"})
+                        continue
+                    try:
+                        CLIENT.rename_file(fid, new)
+                        renamed += 1
+                        results.append({"old": old, "new": new, "status": "renamed"})
+                    except Exception as e:
+                        failed += 1
+                        results.append({"old": old, "new": new, "status": "failed", "error": str(e)})
+                return self._json({"ok": True, "dryRun": dry, "renamed": renamed,
+                                   "skipped": skipped, "failed": failed, "results": results})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
 
         # ---------- [2.0] 分享链接一条龙 ----------
         if action == "share_parse":

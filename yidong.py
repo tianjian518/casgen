@@ -32,7 +32,7 @@ VIDEO_EXT = {
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
-__version__ = "2.0.0"
+__version__ = "4.0.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -593,3 +593,226 @@ class Yun139:
         for part in [t for t in target.split("/") if t]:
             cur = self.find_or_create_folder(part, cur)
         return cur
+
+    # ======================== [4.0] CAS→Strm 播放网关支持 ========================
+    # 对齐光鸭版 OpenList 139 驱动（drivers/139/cas.go 的 linkCASVideo）：
+    #   读 .cas -> 139 秒传临时恢复 -> personalGetLink 拿直链 -> 异步删临时文件
+    # 139 各接口按 OpenList 官方 139 驱动 + 52pojie 逆向实现，【真机未实测，待用户试跑微调】。
+    CAS_TEMP_DIR = "TEMP"
+
+    def ensure_temp_dir(self):
+        """在根目录建/找 TEMP 文件夹，用于临时恢复 .cas 对应的真实文件（恢复后异步删除，保住省空间）。"""
+        items, _, _ = self.list_dir("root")
+        for it in items:
+            if self._is_folder(it) and self._name(it) == self.CAS_TEMP_DIR:
+                return self._fid(it)
+        body = {"parentFileId": "/", "name": self.CAS_TEMP_DIR,
+                "type": "folder", "fileRenameMode": "force_rename"}
+        d = self.personal_post("/file/create", body)
+        dd = d.get("data") if isinstance(d, dict) else None
+        return (dd or {}).get("fileId") or d.get("fileId")
+
+    def get_download_link(self, file_id):
+        """对齐 OpenList 139 驱动 personalGetLink：POST /file/download -> data.downloadUrl。
+        返回可直接拉流的直链（播放器 302 直连，不耗 casgen 带宽）。【真机未实测，响应字段待确认】。"""
+        resp = self.personal_post("/file/download", {"fileId": file_id})
+        if isinstance(resp, dict):
+            d = resp.get("data") or {}
+            url = d.get("downloadUrl") or d.get("download_url") or d.get("url")
+            if url:
+                return url
+        raise Exception("139 获取下载直链失败: %r" % (resp,))
+
+    def read_file_text(self, file_id):
+        """下载小文件（如 .cas 文本）内容。139 直链可能需 Referer，先带上报。"""
+        url = self.get_download_link(file_id)
+        req = urllib.request.Request(url, headers={
+            "Referer": "https://yun.139.com/",
+            "User-Agent": "Mozilla/5.0",
+        })
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8", "replace")
+
+    def cas_get_play_link(self, cas_file_id, cas_name):
+        """核心：给定 .cas 的 file_id + 文件名，返回 (直链URL, 临时恢复的file_id)。
+        调用方拿到 URL 后 302 给播放器，并负责异步删除临时 file_id。"""
+        text = self.read_file_text(cas_file_id)
+        try:
+            payload = json.loads(base64.b64decode(text.strip()))
+        except Exception as e:
+            raise Exception("解析 .cas 失败（不是合法的 casgen .cas）: %s" % e)
+        sha256 = payload.get("sha256", "")
+        size = payload.get("size", 0)
+        name = payload.get("name") or (cas_name[:-4] if cas_name.endswith(".cas") else cas_name)
+        if not sha256:
+            raise Exception(".cas 缺少 sha256，无法秒传恢复")
+        temp_dir = self.ensure_temp_dir()
+        temp_name = "TEMP_%d_%s" % (int(time.time() * 1000), name)
+        # 临时恢复（auto_rename 避免冲突；恢复的是云盘里的临时文件，稍后删除）
+        resp = self.restore(sha256, size, temp_name, temp_dir)
+        temp_fid = (resp.get("_file_id") or resp.get("fileId")
+                    or (resp.get("data") or {}).get("fileId"))
+        if not temp_fid:
+            raise Exception("139 秒传恢复失败（云端去重池可能无此源）: %r" % (resp,))
+        url = self.get_download_link(temp_fid)
+        return url, temp_fid
+
+    def resolve_path_readonly(self, path):
+        """只读把 139 相对路径（如 电影/流浪地球2/流浪地球2.cas）解析为 file_id。不创建文件夹。"""
+        path = (path or "").strip().strip("/")
+        if not path:
+            return "root"
+        parts = [p for p in path.split("/") if p]
+        cur = "root"
+        for part in parts[:-1]:
+            cur = self._find_folder_readonly(part, cur)
+        return self._find_file_readonly(parts[-1], cur)
+
+    def _find_folder_readonly(self, name, parent):
+        items, _, _ = self.list_dir(parent)
+        for it in items:
+            if self._is_folder(it) and self._name(it) == name:
+                return self._fid(it)
+        raise FileNotFoundError("文件夹不存在: %s" % name)
+
+    def _find_file_readonly(self, name, parent):
+        items, _, _ = self.list_dir(parent)
+        for it in items:
+            if not self._is_folder(it) and self._name(it) == name:
+                return self._fid(it)
+        raise FileNotFoundError("文件不存在: %s" % name)
+
+    # ======================== [4.0] .strm 生成器 ========================
+    def walk(self, root, prefix="", _parent=None):
+        """递归遍历 root 下所有文件，yield (相对路径, item)。item 注入 _parent（父目录 fileId）。"""
+        parent_id = _parent if _parent is not None else root
+        cursor = None
+        while True:
+            items, cursor, _ = self.list_dir(root, cursor)
+            if not items:
+                break
+            for it in items:
+                name = self._name(it)
+                rec = dict(it)
+                rec["_parent"] = parent_id
+                if self._is_folder(it):
+                    sub = (prefix + "/" + name) if prefix else name
+                    yield from self.walk(self._fid(it), sub, self._fid(it))
+                else:
+                    rel = (prefix + "/" + name) if prefix else name
+                    yield rel, rec
+            if not cursor:
+                break
+
+    def upload_text_file(self, name, text, parent):
+        """三步上传纯文本文件（如 .strm）到 139：file/create -> PUT -> /file/complete。"""
+        raw = text.encode("utf-8")
+        size = len(raw)
+        content_sha256 = hashlib.sha256(raw).hexdigest()
+        body = {
+            "contentHash": content_sha256,
+            "contentHashAlgorithm": "SHA256",
+            "contentType": "text/plain",
+            "parallelUpload": False,
+            "partInfos": [{"partNumber": 1, "partSize": size}],
+            "size": size,
+            "parentFileId": parent if parent not in ("root", "/", "") else "/",
+            "name": name,
+            "type": "file",
+            "fileRenameMode": "overwrite",
+        }
+        resp = self.personal_post("/file/create", body)
+        if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
+            resp["_create_failed"] = True
+            return resp
+        d = resp.get("data") if isinstance(resp, dict) else None
+        if not isinstance(d, dict):
+            resp["_create_failed"] = True
+            resp["_no_data"] = True
+            return resp
+        file_id = d.get("fileId") or resp.get("fileId")
+        upload_id = d.get("uploadId") or resp.get("uploadId")
+        exist = d.get("exist") or d.get("rapidUpload")
+        if exist and file_id:
+            resp["_file_id"] = file_id
+            resp["_exist"] = True
+            return resp
+        part_infos = d.get("partInfos") or []
+        upload_url = None
+        for p in part_infos:
+            upload_url = p.get("uploadUrl") or p.get("uploadUrl")
+            if upload_url:
+                break
+        if not upload_url:
+            resp["_missing_upload_url"] = True
+            return resp
+        try:
+            req = urllib.request.Request(upload_url, data=raw, headers={
+                "Content-Type": "text/plain",
+                "Content-Length": str(size),
+                "Origin": "https://yun.139.com",
+                "Referer": "https://yun.139.com/",
+            }, method="PUT")
+            urllib.request.urlopen(req, timeout=60).read()
+        except Exception as e:
+            resp["_upload_error"] = str(e)
+            resp["_file_id"] = file_id
+            return resp
+        if file_id and upload_id:
+            try:
+                comp = self.personal_post("/file/complete", {
+                    "contentHash": content_sha256,
+                    "contentHashAlgorithm": "SHA256",
+                    "fileId": file_id,
+                    "uploadId": upload_id,
+                })
+                resp["_complete"] = comp
+            except Exception as e:
+                resp["_complete_error"] = str(e)
+        if file_id:
+            try:
+                resp["_verify_found"] = self._verify_file(parent, file_id)
+            except Exception:
+                resp["_verify_found"] = "verify_error"
+        resp["_file_id"] = file_id
+        resp["_upload_id"] = upload_id
+        return resp
+
+    def generate_strm(self, root, public_url):
+        """遍历 root 下所有 .cas，为每个生成同名 .strm（内容指向 casgen 网关 URL），上传到同目录。
+        public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外可达地址）。"""
+        public_url = (public_url or "").rstrip("/")
+        if not public_url:
+            raise Exception("未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm")
+        results = []
+        for rel, it in self.walk(root):
+            if not rel.lower().endswith(".cas"):
+                continue
+            cas_name = self._name(it)
+            base = cas_name[:-4] if cas_name.endswith(".cas") else cas_name
+            strm_name = base + ".strm"
+            strm_url = "%s/cas/%s" % (public_url, rel)
+            parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
+            try:
+                up = self.upload_text_file(strm_name, strm_url, parent)
+                fid = (up.get("_file_id") or up.get("fileId")
+                       or (up.get("data") or {}).get("fileId"))
+                ok = bool(fid) and not up.get("_upload_error") and not up.get("_complete_error")
+                results.append({
+                    "name": strm_name,
+                    "status": "uploaded" if ok else "failed",
+                    "url": strm_url,
+                    "error": up.get("_upload_error") or up.get("_complete_error"),
+                })
+            except Exception as e:
+                results.append({"name": strm_name, "status": "failed", "error": str(e)})
+        return results
+
+    # ======================== [4.0] L1 本地正则重命名 ========================
+    def rename_file(self, file_id, new_name):
+        """139 重命名（对齐光鸭版 OpenList 139 驱动 personal_new 分支）：
+        POST /file/update {fileId, name, description:''}。只改显示名，不动内容。
+        【真机未实测，响应字段待确认】。"""
+        resp = self.personal_post("/file/update",
+                                  {"fileId": file_id, "name": new_name, "description": ""})
+        return resp
