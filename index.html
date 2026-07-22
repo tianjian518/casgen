@@ -27,6 +27,10 @@
 </style>
 </head>
 <body>
+<div id="authBanner" style="display:none; background:#dc2626; color:#fff; padding:12px 16px; border-radius:8px; margin:12px 0; position:sticky; top:0; z-index:50;">
+  ⚠️ 登录已失效，请重新登录（在顶部「第 1 步」重新粘贴 Authorization 并点登录）。
+  <button id="bannerLoginBtn" style="background:#fff;color:#dc2626;border:0;border-radius:6px;padding:6px 12px;margin-left:10px;cursor:pointer;">去登录</button>
+</div>
 <h1>🎬 网盘影视 转 CAS 瘦身工具 <span id="ver" class="muted">v2026-07-22b</span></h1>
 <p class="muted">把网盘里已有的原视频"零流量"变成几 KB 的 .cas 文件（删掉原视频腾空间，播放时从 .cas 临时恢复）。全部用鼠标操作。</p>
 
@@ -87,6 +91,26 @@
   <table id="shareTable"><thead><tr><th>视频文件</th><th>大小</th></tr></thead><tbody></tbody></table>
 </div>
 
+<!-- 3.0 分享链接定时监控 -->
+<div class="card" id="monitorCard" style="display:none">
+  <h3>📡 分享链接定时监控（剧集更新自动转存 + 生成 CAS）</h3>
+  <p class="muted">添加后会按设定间隔自动检查分享链接，发现新文件就自动转存到目标目录并生成 CAS。最短 60 分钟一次。</p>
+  <label>分享链接（可连提取码一起粘贴）</label>
+  <textarea id="monText" rows="2" placeholder="https://yun.139.com/shareweb/#/w/i/xxx 提取码:xxxx"></textarea>
+  <label>转存到我云盘的目录（留空=根目录；可填目录名或路径）</label>
+  <input type="text" id="monTarget" placeholder="如：监控剧集（留空则存到根目录）">
+  <div class="row">
+    <input type="text" id="monInterval" style="width:120px" value="60" placeholder="间隔(分钟)">
+    <label style="margin:0"><input type="checkbox" id="monAutoCas" checked> 自动生成 CAS</label>
+    <label style="margin:0"><input type="checkbox" id="monDeleteSrc" disabled> 删原视频</label>
+  </div>
+  <div class="row">
+    <button id="monAddBtn">＋ 添加监控</button>
+  </div>
+  <div id="monMsg"></div>
+  <table id="monTable"><thead><tr><th>分享</th><th>目标目录</th><th>间隔</th><th>状态</th><th>上次扫描</th><th>结果</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+
 <!-- 步骤4：恢复播放 -->
 <div class="card" id="restoreCard" style="display:none">
   <h3>第 4 步：从 .cas 恢复播放</h3>
@@ -105,10 +129,40 @@
 <script>
 let state = { currentParent: "root", selectedRoot: "root", selectedName: "", path: [["root","根目录"]] };
 
+// [3.0 模块一] 登录态失效检测：页面加载即查 + 每 60s 轮询；失效则弹横幅提示重登
+async function checkAuth(){
+  try{
+    const d = await api({action:"login_status"});
+    if(d && d.expired){ showAuthBanner(); return; }
+    hideAuthBanner();
+    if(d && d.loggedIn){
+      // 后端已恢复登录态（持久化），自动展开工作区，刷新页面也不丢
+      ["browseCard","opCard","restoreCard","shareCard","monitorCard"].forEach(id=>{
+        const el=document.getElementById(id); if(el) el.style.display="block";
+      });
+      loadMonitors();
+      const foldersEl = document.getElementById("folders");
+      if(foldersEl && !foldersEl.children.length){
+        const r = await api({ action:"list", parent:"root" });
+        dbg(r); renderFolders(r.items||[]);
+      }
+    }
+  }catch(e){ /* 网络异常不干扰页面 */ }
+}
+document.getElementById("bannerLoginBtn").onclick = () => {
+  const el = document.getElementById("auth"); if(el) el.scrollIntoView({behavior:"smooth"});
+};
+setInterval(checkAuth, 60000);
+checkAuth();
+
 function dbg(o){ document.getElementById("debug").textContent = JSON.stringify(o, null, 2); }
 function api(payload){
-  return fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) }).then(r=>r.json());
+  return fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+    .then(r=>r.json())
+    .then(d=>{ if(d && d.needLogin){ showAuthBanner(); } return d; });
 }
+function showAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="block"; }
+function hideAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="none"; }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 document.getElementById("loginBtn").onclick = async () => {
@@ -130,6 +184,7 @@ document.getElementById("loginBtn").onclick = async () => {
     state.path = [["root","根目录"]];
     renderCrumb();
     renderFolders(r.root || []);
+    checkAuth();  // 登录成功后立即刷新失效状态（隐藏横幅）
   } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
 };
 
@@ -286,6 +341,73 @@ window.addEventListener("load", () => {
     state.path=[["root","根目录"]]; renderCrumb(); renderFolders(rr.root||[]);
   });
 });
+// ---------- [3.0 模块五] 分享链接监控管理 ----------
+function monStatusText(m){
+  const map = { ok:"正常 ✔", paused:"已暂停(需重登)", invalid:"链接失效 ✖", error:"出错(将重试)", no_client:"未登录" };
+  return map[m.status] || (m.status||"未知");
+}
+async function loadMonitors(){
+  try{
+    const r = await api({ action:"monitor_list" });
+    dbg(r);
+    if(!r.ok) return;
+    const tb = document.querySelector("#monTable tbody");
+    tb.innerHTML="";
+    (r.monitors||[]).forEach(m=>{
+      const tr=document.createElement("tr");
+      const linkLabel = (m.link_id||"").slice(0,18) + (m.pwd ? "（有码）" : "");
+      let st = monStatusText(m);
+      if(m.status==="invalid") st = '<span style="color:#c0392b">'+st+'</span>';
+      else if(m.status==="error"||m.status==="paused") st = '<span style="color:#e67e22">'+st+'</span>';
+      tr.innerHTML =
+        '<td title="'+esc(m.link_id||"")+'">'+esc(linkLabel)+'</td>'+
+        '<td>'+esc(m.target||"root")+'</td>'+
+        '<td>'+(m.interval_min||60)+'分</td>'+
+        '<td>'+st+'</td>'+
+        '<td>'+(m.last_scan||"—")+'</td>'+
+        '<td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.last_result||"")+'">'+esc(m.last_result||"")+'</td>';
+      const td=document.createElement("td");
+      const b1=document.createElement("button"); b1.textContent="立即扫描";
+      b1.onclick=async()=>{
+        b1.disabled=true; b1.textContent="扫描中…";
+        const rr=await api({action:"monitor_scan_now",id:m.id}); dbg(rr);
+        b1.disabled=false; b1.textContent="立即扫描";
+        if(!rr.ok){ alert(rr.error||"扫描失败"); }
+        else { alert("扫描完成："+(rr.added!=null?("新增 "+rr.added+" 个"):(rr.msg||"OK"))); }
+        loadMonitors();
+      };
+      const b2=document.createElement("button"); b2.textContent="删除"; b2.className="sec";
+      b2.onclick=async()=>{ if(!confirm("删除该监控项？")) return; const rr=await api({action:"monitor_remove",id:m.id}); dbg(rr); loadMonitors(); };
+      td.appendChild(b1); td.appendChild(b2); tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="7" class="muted">暂无监控项，添加后这里会显示</td></tr>';
+  }catch(e){}
+}
+// 勾选「自动生成 CAS」才允许勾选「删除原视频」
+document.getElementById("monAutoCas").addEventListener("change", e=>{
+  document.getElementById("monDeleteSrc").disabled = !e.target.checked;
+});
+document.getElementById("monAddBtn").onclick = async () => {
+  const text=document.getElementById("monText").value;
+  const target=document.getElementById("monTarget").value;
+  const autoCas=document.getElementById("monAutoCas").checked;
+  const deleteSrc=document.getElementById("monDeleteSrc").checked;
+  const intervalRaw=document.getElementById("monInterval").value;
+  const interval=intervalRaw?parseInt(intervalRaw):60;
+  const msg=document.getElementById("monMsg");
+  if(!text.trim()){ msg.innerHTML='<span class="err">请先粘贴分享链接</span>'; return; }
+  msg.innerHTML="添加中…";
+  try{
+    const r=await api({action:"monitor_add",text,target,auto_cas:autoCas,delete_source:deleteSrc,interval_min:interval});
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error||"失败")+'</span>'; return; }
+    msg.innerHTML='<span class="ok">已添加并开始监控</span>';
+    document.getElementById("monText").value="";
+    loadMonitors();
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
 </script>
 </body>
 </html>

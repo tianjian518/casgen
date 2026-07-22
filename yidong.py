@@ -68,6 +68,40 @@ def _rand_str(n=16) -> str:
     return "".join(random.choice(_RAND_CHARS) for _ in range(n))
 
 
+# ============================ 登录失效检测 ============================
+class TokenExpired(Exception):
+    """139 登录态失效（token 过期/被踢/异地登录），需提示用户重新登录。"""
+
+
+# 已知失效错误码（取自 share139.FATAL_CODES 中与认证相关的项）
+_AUTH_FAIL_CODES = {"05050006", "04000005"}
+# 失效关键词兜底：接口返回的 message/desc 里出现这些即视为失效，
+# 覆盖「码未知但语义明确是登录失效」的情况，越稳妥越好。
+_AUTH_FAIL_KW = ("token", "失效", "过期", "未登录", "重新登录", "重新登陆",
+                "登录已", "未授权", "unauthorized", "please login",
+                "auth fail", "auth expired", "login expired")
+
+
+def _detect_auth_failure(data):
+    """识别 139 个人云接口的登录失效响应，命中则抛 TokenExpired。
+    网络层错误（_error / _raw）不属于认证失效，不在此处理，交由调用方判断。
+    """
+    if not isinstance(data, dict):
+        return
+    if data.get("_error") is not None or data.get("_raw") is not None:
+        return
+    code = str(data.get("code") or data.get("errorCode") or data.get("resultCode") or "")
+    msg = str(data.get("message") or data.get("desc") or data.get("errorMsg")
+              or data.get("resultDesc") or "")
+    if code in _AUTH_FAIL_CODES:
+        raise TokenExpired("登录已失效（code=%s）：%s" % (code, msg))
+    low = msg.lower()
+    if any(kw in low for kw in _AUTH_FAIL_KW):
+        raise TokenExpired("登录已失效：%s" % msg)
+    if data.get("success") is False and any(kw in low for kw in _AUTH_FAIL_KW):
+        raise TokenExpired("登录已失效：%s" % msg)
+
+
 # ============================ 139 云盘客户端 ============================
 class Yun139:
     # 路由策略接口（host 固定）
@@ -217,7 +251,11 @@ class Yun139:
     # ---------- 个人云请求封装 ----------
     def personal_post(self, path, body):
         host = self._ensure_host()
-        return self._post_json(host + path, self.personal_headers, body)
+        data = self._post_json(host + path, self.personal_headers, body)
+        # 统一在个人云层识别登录失效，命中即抛 TokenExpired，
+        # 上层（app.py 路由 / 监控线程）捕获后提示重登并暂停。
+        _detect_auth_failure(data)
+        return data
 
     # ---------- 字段归一化（兼容多种命名） ----------
     @staticmethod

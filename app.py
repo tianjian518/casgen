@@ -12,17 +12,21 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from yidong import Yun139, __version__ as VERSION
+from yidong import Yun139, TokenExpired, __version__ as VERSION
 from share139 import (parse_share_input, get_share_info, list_all_share_files,
                       save_share_files, ShareError)
+import monitor
+import monitor_store
 # from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
 PROVIDER = None
+AUTH_EXPIRED = False  # 登录态是否失效（token 过期等）；失效则提示重登并暂停监控
 RECORDS = []  # 最近一次转换的记录，供"恢复播放"使用
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(ROOT, "index.html")
 DEBUG_LOG = os.path.join(ROOT, "casgen_debug.log")
+AUTH_FILE = os.path.join(ROOT, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
 
 
 def _log_debug(tag, obj):
@@ -32,6 +36,26 @@ def _log_debug(tag, obj):
             f.write("[%s] %s\n" % (tag, json.dumps(obj, ensure_ascii=False)))
     except Exception:
         pass
+
+
+# ============================ 登录态持久化（3.0 模块一） ============================
+def _save_auth(auth, provider):
+    """把登录凭证落盘，重启/刷新页面后自动恢复，无需重新粘贴。"""
+    try:
+        with open(AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump({"token": auth, "provider": provider}, f)
+    except Exception:
+        pass
+
+
+def _load_auth():
+    try:
+        if os.path.exists(AUTH_FILE):
+            with open(AUTH_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
 
 
 class H(BaseHTTPRequestHandler):
@@ -69,11 +93,21 @@ class H(BaseHTTPRequestHandler):
             p = json.loads(raw.decode("utf-8", "replace") or "{}")
         except Exception:
             p = {}
-        self.route(p)
+        try:
+            self.route(p)
+        except TokenExpired:
+            # 任一 139 接口返回登录失效，统一提示前端重登，并标记失效
+            global AUTH_EXPIRED
+            AUTH_EXPIRED = True
+            self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
 
     def route(self, p):
         global CLIENT, PROVIDER, RECORDS
         action = p.get("action")
+
+        if action == "login_status":
+            return self._json({"ok": True, "loggedIn": CLIENT is not None,
+                               "expired": AUTH_EXPIRED, "provider": PROVIDER})
 
         if action == "login":
             prov = p.get("provider")
@@ -86,6 +120,8 @@ class H(BaseHTTPRequestHandler):
                     items, _, data = c.list_dir("root")  # 用列根目录验证账号有效
                     CLIENT = c
                     PROVIDER = "139"
+                    AUTH_EXPIRED = False
+                    _save_auth(auth, "139")
                     resp = {"ok": True, "provider": "139",
                             "version": VERSION,
                             "root": [self._fmt(i) for i in items],
@@ -105,6 +141,9 @@ class H(BaseHTTPRequestHandler):
 
         if CLIENT is None:
             return self._json({"ok": False, "error": "请先登录"}, 400)
+
+        if AUTH_EXPIRED:
+            return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"}, 400)
 
         if action == "list":
             parent = p.get("parent", "root")
@@ -189,6 +228,50 @@ class H(BaseHTTPRequestHandler):
             _log_debug("restore", resp)
             return self._json(resp)
 
+        # ---------- [3.0] 分享链接定时监控 ----------
+        if action == "monitor_add":
+            text = (p.get("text") or "").strip()
+            target = (p.get("target") or "root").strip() or "root"
+            auto_cas = bool(p.get("auto_cas", True))
+            delete_source = bool(p.get("delete_source", False)) and auto_cas
+            interval = max(60, int(p.get("interval_min") or 60))
+            link_id, pwd = parse_share_input(text)
+            if not link_id:
+                return self._json({"ok": False, "error": "未能解析出分享链接ID"})
+            if CLIENT is None:
+                return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
+            if AUTH_EXPIRED:
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+            try:
+                mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval)
+            except ShareError as e:
+                return self._json({"ok": False, "error": "链接验证失败：" + e.message, "fatal": e.fatal})
+            except TokenExpired:
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效"})
+            return self._json({"ok": True, "monitor": mon})
+
+        if action == "monitor_list":
+            return self._json({"ok": True, "monitors": monitor_store.list_all()})
+
+        if action == "monitor_remove":
+            mid = p.get("id")
+            if not mid:
+                return self._json({"ok": False, "error": "缺少 id"})
+            monitor_store.remove(mid)
+            return self._json({"ok": True})
+
+        if action == "monitor_scan_now":
+            mid = p.get("id")
+            m = monitor_store.get(mid)
+            if not m:
+                return self._json({"ok": False, "error": "监控项不存在"})
+            if CLIENT is None:
+                return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
+            if AUTH_EXPIRED:
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+            res = monitor.scan_one(m)
+            return self._json({"ok": True, **res})
+
         return self._json({"ok": False, "error": "未知操作"}, 400)
 
     @staticmethod
@@ -204,11 +287,35 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
+    global CLIENT, PROVIDER, AUTH_EXPIRED
     # 每次启动时清空旧调试日志，避免多轮测试内容混在一起
     try:
         open(DEBUG_LOG, "w", encoding="utf-8").close()
     except Exception:
         pass
+    # 启动即恢复持久化的登录态（3.0 模块一）
+    auth = _load_auth()
+    if auth and auth.get("token"):
+        try:
+            c = Yun139(auth["token"])
+            c.list_dir("root")  # 轻量校验 token 是否仍有效
+            CLIENT = c
+            PROVIDER = auth.get("provider", "139")
+            AUTH_EXPIRED = False
+        except TokenExpired:
+            # token 还在，但已失效：保留 CLIENT 以便前端提示重登，标记 expired
+            try:
+                CLIENT = Yun139(auth["token"])
+            except Exception:
+                CLIENT = None
+            PROVIDER = auth.get("provider", "139")
+            AUTH_EXPIRED = True
+        except Exception:
+            CLIENT = None
+    # 启动分享链接监控调度（3.0 模块三/四）
+    monitor.bind(sys.modules[__name__])
+    monitor.start_scheduler()
+
     port = int(os.environ.get("PORT", "5000"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     print("=" * 50)
