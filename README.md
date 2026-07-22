@@ -98,10 +98,10 @@ python3 --version
 
 ### 路线 A：飞牛 FnOS Docker「镜像仓库」直接搜到安装（你要的这条）
 1. 飞牛应用中心装好「Docker」应用（系统自带）。
-2. 打开 Docker → **镜像仓库** → 搜索 `38240605-creator/casgen`
-   （把前缀 `38240605-creator` 换成**你自己的 Docker Hub 用户名**；注册/获取见下方"Docker Hub 账号"）。
+2. 打开 Docker → **镜像仓库** → 搜索 `tianjian518/casgen`
+   （把前缀 `tianjian518` 换成**你自己的 Docker Hub 用户名**；注册/获取见下方"Docker Hub 账号"）。
 3. 搜到后点「拉取」，等进度条走完。
-4. 切到「容器」→「创建容器」→ 镜像选刚拉取的 `38240605-creator/casgen` →
+4. 切到「容器」→「创建容器」→ 镜像选刚拉取的 `tianjian518/casgen` →
    **端口映射**填：容器端口 `5000` → 主机端口 `5000` → 确定。
 5. 浏览器打开 `http://飞牛IP:5000` 即可用。
 

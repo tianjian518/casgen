@@ -1,10 +1,10 @@
 # 飞牛(N1) / 群晖 / 任意 Docker 环境一键运行
 # 用法：docker compose up -d  即可（镜像由 GitHub Actions 自动构建并推到 Docker Hub）
-# 如果你的 Docker Hub 用户名不是 38240605-creator，把下面镜像名里的前缀改成你的 Docker Hub 用户名。
+# 如果你的 Docker Hub 用户名不是 tianjian518，把下面镜像名里的前缀改成你的 Docker Hub 用户名。
 services:
   casgen:
     # GitHub Actions 自动构建并推到 Docker Hub：<你的DockerHub用户名>/casgen:latest
-    image: 38240605-creator/casgen:latest
+    image: tianjian518/casgen:latest
     container_name: casgen
     ports:
       - "5000:5000"
