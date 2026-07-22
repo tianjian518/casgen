@@ -85,6 +85,10 @@
   <div id="sharePicker" class="card" style="display:none; margin-top:8px; padding:12px;">
     <div class="crumb" id="shareCrumb"></div>
     <div id="shareFolders"></div>
+    <div class="row" style="margin-top:8px;">
+      <input type="text" id="shareNewName" placeholder="在当前目录下新建子目录" style="flex:1">
+      <button type="button" id="shareNewBtn" class="sec">➕ 新建</button>
+    </div>
     <div class="row">
       <button type="button" id="shareUse" class="sec">✔ 选定此目录</button>
       <button type="button" id="shareCancel" class="sec">取消</button>
@@ -558,6 +562,19 @@ function mountFolderPicker(prefix, targetInputId){
     input.value = parts.join("/");                   // 空字符串=根目录
     if (cur) cur.textContent = "已选：" + (parts.join("/") || "根目录");
     picker.style.display = "none";
+  };
+  document.getElementById(prefix+"NewBtn").onclick = async () => {
+    const name = document.getElementById(prefix+"NewName").value.trim();
+    if (!name) { if (cur) cur.textContent = "请输入目录名"; return; }
+    const r = await api({ action:"create_folder", parent: pick.currentParent, name });
+    dbg(r);
+    if (!r.ok) { if (cur) cur.textContent = "创建失败：" + esc(r.error); return; }
+    pick.currentParent = r.fileId;
+    pick.path.push([r.fileId, name]);
+    document.getElementById(prefix+"NewName").value = "";
+    const r2 = await api({ action:"list", parent: r.fileId });
+    dbg(r2); renderFolders(r2.items||[]); renderCrumb();
+    if (cur) cur.textContent = "已新建并进入：" + name;
   };
   document.getElementById(prefix+"Cancel").onclick = () => {
     picker.style.display = "none";

@@ -198,6 +198,18 @@ class H(BaseHTTPRequestHandler):
             items, _, data = CLIENT.list_dir(parent)
             return self._json({"ok": True, "items": [self._fmt(i) for i in items], "raw": data})
 
+        # ---------- 目录选择器：在指定目录下新建子目录 ----------
+        if action == "create_folder":
+            parent = p.get("parent", "root")
+            name = (p.get("name") or "").strip()
+            if not name:
+                return self._json({"ok": False, "error": "请输入目录名"}, 400)
+            try:
+                fid = CLIENT.find_or_create_folder(name, parent)
+            except Exception as e:
+                return self._json({"ok": False, "error": "创建文件夹失败：" + str(e)}, 400)
+            return self._json({"ok": True, "fileId": fid, "name": name, "parent": parent})
+
         if action == "plan":
             root = p.get("root", "root")
             ok, skip, sample = CLIENT.plan(root)
