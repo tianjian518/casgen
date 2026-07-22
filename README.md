@@ -148,6 +148,20 @@ docker compose up -d        # 直接拉 Docker Hub 镜像运行
 
 ---
 
+## 七·五、部署到 Hugging Face Spaces（抱脸）
+
+把 casgen 跑在 HF Space 上，等于一个常驻公网网页，手机/平板/电视盒子都能开网页登录 139 操作。本程序已支持读 `PORT` 环境变量并绑定 `0.0.0.0`，**无需改任何代码**，只靠仓库里的 `Dockerfile` 即可。
+
+1. 在 Hugging Face 新建 **Space**，SDK 选 **Docker**（或复用已有的 Docker 类型 Space）。
+2. 把本仓库全部文件（含根目录的 `Dockerfile`、`app.py`、`index.html` 等）放进 Space 仓库根目录——可 `git clone` 本仓库后 push 到 Space，或网页上传。
+3. HF 自动 `docker build`，并用注入的 `PORT`（默认 7860）启动；构建完成打开 Space 公开 URL，登录移动云盘(139) 即用。
+4. 4.0 的播放网关 `/cas/` 与 `.strm` 直链需要 `CASGEN_PUBLIC_URL` 指向**播放器能访问到的地址**；若用 Space 公网地址，填 `https://你的space名.hf.space` 即可。
+
+⚠️ 注意：
+- Space 默认**公开**，任何人都能打开网页操作你的 139 账号。建议 Space 设为 **Private**（需登录 HF 才能访问），或在 Space 设置里开启访问密码。
+- 免费 Space 一段时间无访问会**休眠**，下次访问自动唤醒（首次冷启动需等十几秒）；登录态持久化在容器内文件，唤醒后自动恢复（token 过期则需重登）。
+- 临时恢复的 `.cas` 真实文件由 `CASGEN_CAS_CLEANUP_DELAY`（默认 3600 秒）延迟清理，休眠不影响已生成的 `.strm`（`.strm` 是文本，常驻云盘）。
+
 ## 八、GitHub 仓库说明
 
 本仓库即镜像源码，Docker 镜像由 GitHub Actions 自动构建并推到 Docker Hub：
