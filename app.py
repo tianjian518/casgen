@@ -196,7 +196,13 @@ class H(BaseHTTPRequestHandler):
         if action == "list":
             parent = p.get("parent", "root")
             items, _, data = CLIENT.list_dir(parent)
-            return self._json({"ok": True, "items": [self._fmt(i) for i in items], "raw": data})
+            fmt = [self._fmt(i) for i in items]
+            # 透传 139 原始 fileId，防止 _fmt 归一化在个别字段名下丢失，
+            # 前端点击展开时用 it.fileId || it._rawId 兜底，避免 parent 为空退化成根目录。
+            for raw, f in zip(items, fmt):
+                f["_rawId"] = (raw.get("fileId") or raw.get("contentID") or raw.get("id")
+                               or raw.get("catalogId") or raw.get("fid") or "")
+            return self._json({"ok": True, "items": fmt, "raw": data})
 
         # ---------- 目录选择器：在指定目录下新建子目录 ----------
         if action == "create_folder":
@@ -382,10 +388,23 @@ class H(BaseHTTPRequestHandler):
 
     @staticmethod
     def _fmt(i):
-        t = (i.get("type") or i.get("fileType") or i.get("contentType") or "").lower()
-        is_folder = t in ("folder", "dir")
+        if not isinstance(i, dict):
+            i = {}
+        # ID：兼容 139 个人云多种返回字段名（personal / personal_new / 旧版 contentID 等）
+        fid = (i.get("fileId") or i.get("contentID") or i.get("id")
+               or i.get("catalogId") or i.get("fid") or i.get("fileIdStr") or "")
+        # 文件夹判断：type=="folder"/"dir"，或 fileType/contentType 为数字 1/2（1=文件夹,2=文件），
+        # 或显式 isFolder 标记。原逻辑对数字 fileType 会 .lower() 抛 AttributeError，这里健壮化。
+        t = i.get("type") or i.get("fileType") or i.get("contentType") or ""
+        is_folder = False
+        if isinstance(t, str):
+            is_folder = t.strip().lower() in ("folder", "dir")
+        elif isinstance(t, (int, float)):
+            is_folder = t in (1, 2)
+        if not is_folder and i.get("isFolder") is True:
+            is_folder = True
         return {
-            "fileId": i.get("fileId") or i.get("contentID") or i.get("id"),
+            "fileId": fid,
             "name": i.get("name") or i.get("fileName") or i.get("contentName") or "",
             "type": "folder" if is_folder else "file",
             "size": i.get("size") or i.get("fileSize") or i.get("contentSize") or 0,
@@ -404,18 +423,17 @@ def main():
     if auth and auth.get("token"):
         try:
             c = Yun139(auth["token"])
-            c.list_dir("root")  # 轻量校验 token 是否仍有效
+            try:
+                c.list_dir("root")  # 轻量校验 token 是否仍有效
+                AUTH_EXPIRED = False
+            except TokenExpired:
+                AUTH_EXPIRED = True
+            except Exception:
+                # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
+                # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登
+                AUTH_EXPIRED = False
             CLIENT = c
             PROVIDER = auth.get("provider", "139")
-            AUTH_EXPIRED = False
-        except TokenExpired:
-            # token 还在，但已失效：保留 CLIENT 以便前端提示重登，标记 expired
-            try:
-                CLIENT = Yun139(auth["token"])
-            except Exception:
-                CLIENT = None
-            PROVIDER = auth.get("provider", "139")
-            AUTH_EXPIRED = True
         except Exception:
             CLIENT = None
     # 启动分享链接监控调度（3.0 模块三/四）

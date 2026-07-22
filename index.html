@@ -176,21 +176,38 @@ let state = { currentParent: "root", selectedRoot: "root", selectedName: "", pat
 async function checkAuth(){
   try{
     const d = await api({action:"login_status"});
-    if(d && d.expired){ showAuthBanner(); return; }
-    hideAuthBanner();
+    if(d && d.expired){ showAuthBanner(); return; }  // 登录已失效，提示重登，不展开
     if(d && d.loggedIn){
-      // 后端已恢复登录态（持久化），自动展开工作区，刷新页面也不丢
-      ["browseCard","opCard","restoreCard","shareCard","monitorCard","strmCard","renameCard"].forEach(id=>{
-        const el=document.getElementById(id); if(el) el.style.display="block";
-      });
-      loadMonitors();
-      const foldersEl = document.getElementById("folders");
-      if(foldersEl && !foldersEl.children.length){
-        const r = await api({ action:"list", parent:"root" });
-        dbg(r); renderFolders(r.items||[]);
+      hideAuthBanner();
+      expandWorkspace();
+      return;
+    }
+    // 后端无登录态（进程重启 / 未持久化等）：主动用浏览器本地缓存的 token 自动重登，
+    // 覆盖「刷新页面 / 重启服务」后仍保持登录，不依赖页面 load 事件时机。
+    const saved = readLocal("casgen_auth");
+    if(saved){
+      const prov = readLocal("casgen_prov") || "139";
+      const r = await api({ action:"login", provider:prov, authorization:saved });
+      dbg(r);
+      if(r && r.ok){
+        hideAuthBanner();
+        expandWorkspace(r);
+        return;
       }
     }
+    hideAuthBanner();
   }catch(e){ /* 网络异常不干扰页面 */ }
+}
+function readLocal(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function expandWorkspace(d){
+  ["browseCard","opCard","restoreCard","shareCard","monitorCard","strmCard","renameCard"].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.style.display="block";
+  });
+  loadMonitors();
+  const foldersEl = document.getElementById("folders");
+  if(foldersEl && !foldersEl.children.length){
+    api({ action:"list", parent:"root" }).then(r=>{ dbg(r); renderFolders((r&&r.items)||[]); });
+  }
 }
 document.getElementById("bannerLoginBtn").onclick = () => {
   const el = document.getElementById("auth"); if(el) el.scrollIntoView({behavior:"smooth"});
@@ -256,9 +273,14 @@ async function renderFolders(items){
     d.className = "folder";
     d.textContent = "📁 " + it.name;
     d.onclick = async () => {
-      state.currentParent = it.fileId;
-      state.path.push([it.fileId, it.name]);
-      const r = await api({ action:"list", parent: it.fileId });
+      const fid = it.fileId || it._rawId || "";
+      if (!fid){
+        alert("该目录缺少 fileId，无法展开。请打开页面底部「🛠 原始接口返回」，把点击后 list 子目录的 raw 数据发给我定位。");
+        return;
+      }
+      state.currentParent = fid;
+      state.path.push([fid, it.name]);
+      const r = await api({ action:"list", parent: fid });
       dbg(r); renderFolders(r.items||[]); renderCrumb();
     };
     el.appendChild(d);
@@ -285,7 +307,7 @@ document.getElementById("planBtn").onclick = async () => {
   msg.innerHTML = s;
 };
 
-document.getElementById("conn").onclick = async () => {
+document.getElementById("convertBtn").onclick = async () => {
   const del = document.getElementById("delChk").checked;
   const msg = document.getElementById("convMsg");
   msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
@@ -368,24 +390,14 @@ document.getElementById("shareAutoCas").addEventListener("change", e=>{
 
 // ---------- [2.0] 登录持久化：刷新后自动从 localStorage 重登 ----------
 window.addEventListener("load", () => {
-  const saved = localStorage.getItem("casgen_auth");
-  if (!saved) return;
-  document.getElementById("auth").value = saved;
-  const prov = localStorage.getItem("casgen_prov") || "139";
-  const rb = document.querySelector('input[name=prov][value="'+prov+'"]');
-  if (rb) rb.checked = true;
-  api({ action:"login", provider:prov, authorization:saved }).then(rr=>{
-    dbg(rr);
-    if (!rr.ok) return;
-    if (rr.version) document.getElementById("ver").textContent = "v"+rr.version;
-    document.getElementById("loginMsg").innerHTML = '<span class="ok">已自动登录 ✔（从本地缓存恢复）</span>';
-    document.getElementById("browseCard").style.display="block";
-    document.getElementById("opCard").style.display="block";
-    document.getElementById("restoreCard").style.display="block";
-    document.getElementById("shareCard").style.display="block";
-    document.getElementById("strmCard").style.display="block";
-    state.path=[["root","根目录"]]; renderCrumb(); renderFolders(rr.root||[]);
-  });
+  const saved = readLocal("casgen_auth");
+  if(saved){
+    document.getElementById("auth").value = saved;
+    const prov = readLocal("casgen_prov") || "139";
+    const rb = document.querySelector('input[name=prov][value="'+prov+'"]');
+    if(rb) rb.checked = true;
+  }
+  checkAuth();  // 统一登录态恢复入口（含本地 token 自动重登）
 });
 // ---------- [3.0 模块五] 分享链接监控管理 ----------
 function monStatusText(m){
@@ -541,9 +553,11 @@ function mountFolderPicker(prefix, targetInputId){
       d.className = "folder";
       d.textContent = "📁 " + it.name;
       d.onclick = async () => {
-        pick.currentParent = it.fileId;
-        pick.path.push([it.fileId, it.name]);
-        const r = await api({ action:"list", parent: it.fileId });
+        const fid = it.fileId || it._rawId || "";
+        if (!fid){ alert("该目录缺少 fileId，无法展开。"); return; }
+        pick.currentParent = fid;
+        pick.path.push([fid, it.name]);
+        const r = await api({ action:"list", parent: fid });
         dbg(r); renderFolders(r.items||[]); renderCrumb();
       };
       folders.appendChild(d);
