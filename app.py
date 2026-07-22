@@ -151,6 +151,9 @@ class H(BaseHTTPRequestHandler):
         if action == "share_save":
             text = (p.get("text") or "").strip()
             target = (p.get("target") or "root").strip() or "root"
+            auto_cas = bool(p.get("auto_cas", False))
+            # 删除原视频仅在「自动生成 CAS」勾选时才有意义，否则忽略
+            delete_source = bool(p.get("delete_source", False)) and auto_cas
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
@@ -161,12 +164,18 @@ class H(BaseHTTPRequestHandler):
                 ca_paths = []  # 当前只转存视频文件，不递归转存子目录
                 res = save_share_files(link_id, co_paths, ca_paths, target_catalog,
                                        need_password=bool(pwd), token=CLIENT.token)
+                saved = len(co_paths)
+                cas_results = None
+                # [2.0+] 勾选「自动生成 CAS」则转存后直接对该目录生成 CAS，形成一条龙
+                if auto_cas:
+                    cas_results = CLIENT.generate(target_catalog, delete_source=delete_source)
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
                 return self._json({"ok": False, "error": "转存失败：" + str(e)})
             return self._json({"ok": True, "targetCatalog": target_catalog,
-                               "saved": len(co_paths), "result": res})
+                               "saved": saved, "result": res,
+                               "autoCas": auto_cas, "casResults": cas_results})
 
         if action == "restore":
             sha = p.get("sha256")

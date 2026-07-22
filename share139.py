@@ -7,7 +7,7 @@
 该协议【不需要 mcloud-sign 签名，也不需要请求体加密】，直接用 JSON 调用即可。
 
 同时内置 OutLinkCrypto（AES-128-CBC + PKCS7，密钥 "PVGDwmcvfs1uV3d1"，IV 16 字节前置，整体 Base64），
-对应官方 App 新版加密外链接口，作为备用能力（按用户决策引入 pycryptodome 依赖，非可选）。
+对应官方 App 新版加密外链接口，作为备用能力（pycryptodome 为可选依赖，未安装时仅此类不可用，主流程不受影响）。
 
 设计原则（用户要求）：自主可控、不依赖第三方 SDK、核心代码自己维护。
 """
@@ -17,10 +17,6 @@ import json
 import re
 import urllib.request
 import urllib.error
-
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
-from Crypto.Random import get_random_bytes
 
 # ============================ 常量 ============================
 SHARE_HOST = "https://share-kd-njs.yun.139.com"
@@ -227,13 +223,17 @@ class OutLinkCrypto:
 
     算法：AES-128-CBC + PKCS7；密钥固定 "PVGDwmcvfs1uV3d1"(UTF-8)；
           IV 随机 16 字节，拼接在密文前；整体 Base64（标准，非 URL-safe）。
-    当前分享解析走明文 V6 协议用不到它，但按用户决策保留 pycryptodome 依赖并自维护此能力。
+    当前分享解析走明文 V6 协议用不到它；pycryptodome 为可选依赖，采用惰性导入，
+    未安装时仅此类不可用，不影响主流程（解析/转存仍正常工作）。
     """
 
     KEY = b"PVGDwmcvfs1uV3d1"
 
     @staticmethod
     def encrypt(plaintext_json: str) -> str:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import pad
+        from Crypto.Random import get_random_bytes
         iv = get_random_bytes(16)
         cipher = AES.new(OutLinkCrypto.KEY, AES.MODE_CBC, iv)
         ct = cipher.encrypt(pad(plaintext_json.encode("utf-8"), AES.block_size))
@@ -241,6 +241,8 @@ class OutLinkCrypto:
 
     @staticmethod
     def decrypt(b64_text: str) -> str:
+        from Crypto.Cipher import AES
+        from Crypto.Util.Padding import unpad
         raw = base64.b64decode(re.sub(r"\s+", "", b64_text))
         iv, ct = raw[:16], raw[16:]
         cipher = AES.new(OutLinkCrypto.KEY, AES.MODE_CBC, iv)

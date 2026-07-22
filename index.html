@@ -75,6 +75,10 @@
   <textarea id="shareText" rows="3" placeholder="例如：https://yun.139.com/shareweb/#/w/i/2qidG1XEkUKi0 提取码:d78q"></textarea>
   <label>转存到我云盘的目录（留空=根目录；可填目录名或路径，如 分享转存 或 /电影/分享）</label>
   <input type="text" id="shareTarget" placeholder="如：分享转存（留空则存到根目录）">
+  <div class="checks" style="margin:10px 0">
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareAutoCas"> 转存后自动生成 CAS（一条龙，省一步）</label>
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareDeleteSrc" disabled> 生成 CAS 后删除原视频（勾选上面才生效）</label>
+  </div>
   <div class="row">
     <button id="shareParseBtn">① 解析并列出视频</button>
     <button id="shareSaveBtn" class="sec">② 转存视频到我云盘</button>
@@ -239,15 +243,28 @@ document.getElementById("shareParseBtn").onclick = async () => {
 document.getElementById("shareSaveBtn").onclick = async () => {
   const text = document.getElementById("shareText").value;
   const target = document.getElementById("shareTarget").value;
+  const autoCas = document.getElementById("shareAutoCas").checked;
+  const deleteSrc = document.getElementById("shareDeleteSrc").checked;
   const msg = document.getElementById("shareMsg");
-  msg.innerHTML = "转存中…";
+  msg.innerHTML = autoCas ? "转存并生成 CAS 中…" : "转存中…";
   try {
-    const r = await api({ action:"share_save", text, target });
+    const r = await api({ action:"share_save", text, target, auto_cas:autoCas, delete_source:deleteSrc });
     dbg(r);
     if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
-    msg.innerHTML = '<span class="ok">已转存 '+r.saved+' 个视频到我云盘目录（catalogID='+esc(r.targetCatalog)+'）</span>';
+    let txt = '已转存 '+r.saved+' 个视频到我云盘目录（catalogID='+esc(r.targetCatalog)+'）';
+    if (r.autoCas && r.casResults){
+      const up = (r.casResults||[]).filter(x=>x.status==='uploaded').length;
+      const dl = (r.casResults||[]).filter(x=>x.status==='deleted').length;
+      txt += '；已自动生成 '+up+' 个 CAS' + (dl ? ('，并删除 '+dl+' 个原视频') : '');
+    }
+    msg.innerHTML = '<span class="ok">'+txt+'</span>';
   } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
 };
+
+// 勾选「自动生成 CAS」才允许勾选「删除原视频」
+document.getElementById("shareAutoCas").addEventListener("change", e=>{
+  document.getElementById("shareDeleteSrc").disabled = !e.target.checked;
+});
 
 // ---------- [2.0] 登录持久化：刷新后自动从 localStorage 重登 ----------
 window.addEventListener("load", () => {
