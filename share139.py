@@ -51,6 +51,7 @@ class ShareError(Exception):
 
     def __init__(self, message, code=None, fatal=False):
         super().__init__(message)
+        self.message = message
         self.api_code = code
         self.fatal = fatal
 

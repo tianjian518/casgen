@@ -6,8 +6,10 @@
 
 所有功能都在网页里用鼠标点，不用碰命令行、不用改代码。
 """
+import base64
 import json
 import os
+import re
 import sys
 import threading
 import urllib.parse
@@ -25,6 +27,7 @@ import rename
 CLIENT = None
 PROVIDER = None
 AUTH_EXPIRED = False  # 登录态是否失效（token 过期等）；失效则提示重登并暂停监控
+MSISDN = ""  # 当前账号手机号（msisdn）：139 转存接口必填，登录时从 token 解码
 RECORDS = []  # 最近一次转换的记录，供"恢复播放"使用
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(ROOT, "index.html")
@@ -37,6 +40,35 @@ def _log_debug(tag, obj):
     try:
         with open(DEBUG_LOG, "a", encoding="utf-8") as f:
             f.write("[%s] %s\n" % (tag, json.dumps(obj, ensure_ascii=False)))
+    except Exception:
+        pass
+
+
+# ============================ 手机号(msisdn) 提取 ============================
+def _extract_phone(auth):
+    """从 Authorization(base64) 里抠出手机号(msisdn)。139 转存接口必填。
+    解码后格式： pc:<11位手机号>:<其余>。"""
+    if not auth:
+        return ""
+    try:
+        try:
+            raw = base64.b64decode(auth)
+        except Exception:
+            raw = base64.b64decode(auth + "===")
+        parts = raw.decode("utf-8", "ignore").split(":")
+        if len(parts) >= 2 and re.fullmatch(r"\d{11}", parts[1] or ""):
+            return parts[1]
+    except Exception:
+        pass
+    return ""
+
+
+def _apply_msisdn(auth):
+    """登录时调用：解码手机号并同步给监控模块（转存必填）。"""
+    global MSISDN
+    MSISDN = _extract_phone(auth)
+    try:
+        monitor.set_phone(MSISDN)
     except Exception:
         pass
 
@@ -177,6 +209,7 @@ class H(BaseHTTPRequestHandler):
                     CLIENT = c
                     PROVIDER = "139"
                     AUTH_EXPIRED = False
+                    _apply_msisdn(auth)
                     _save_auth(auth, "139")
                     resp = {"ok": True, "provider": "139",
                             "version": VERSION,
@@ -325,6 +358,11 @@ class H(BaseHTTPRequestHandler):
             auto_cas = bool(p.get("auto_cas", False))
             # 删除原视频仅在「自动生成 CAS」勾选时才有意义，否则忽略
             delete_source = bool(p.get("delete_source", False)) and auto_cas
+            # [3.0+] 勾选「转存后加入监控」：把该分享链接自动列入定时监控，
+            # 后续新增剧集自动转 CAS 并删原视频（详见 monitor.scan_one）。
+            add_to_monitor = bool(p.get("add_to_monitor", False))
+            interval = max(monitor_store.MIN_INTERVAL,
+                           int(p.get("interval_min") or monitor_store.MIN_INTERVAL))
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
@@ -334,19 +372,34 @@ class H(BaseHTTPRequestHandler):
                 co_paths = [f["path"] for f in files]
                 ca_paths = []  # 当前只转存视频文件，不递归转存子目录
                 res = save_share_files(link_id, co_paths, ca_paths, target_catalog,
-                                       need_password=bool(pwd), token=CLIENT.token)
+                                       need_password=bool(pwd), phone=MSISDN,
+                                       token=CLIENT.token)
                 saved = len(co_paths)
                 cas_results = None
                 # [2.0+] 勾选「自动生成 CAS」则转存后直接对该目录生成 CAS，形成一条龙
                 if auto_cas:
                     cas_results = CLIENT.generate(target_catalog, delete_source=delete_source)
+                # [3.0+] 勾选「转存后加入监控」则建立监控基线；新增剧集自动转 CAS + 删原视频
+                monitor_info = None
+                if add_to_monitor:
+                    try:
+                        mon = monitor.add_and_baseline(link_id, pwd, target,
+                                                       auto_cas=True, delete_source=True,
+                                                       interval=interval)
+                        monitor_info = {"id": mon["id"], "status": mon.get("status"),
+                                        "lastResult": mon.get("last_result"),
+                                        "intervalMin": mon.get("interval_min")}
+                    except Exception as e:
+                        # 转存已成功，监控登记失败不应掩盖成功结果
+                        monitor_info = {"error": "已转存，但加入监控失败：" + str(e)}
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
                 return self._json({"ok": False, "error": "转存失败：" + str(e)})
             return self._json({"ok": True, "targetCatalog": target_catalog,
                                "saved": saved, "result": res,
-                               "autoCas": auto_cas, "casResults": cas_results})
+                               "autoCas": auto_cas, "casResults": cas_results,
+                               "addToMonitor": add_to_monitor, "monitor": monitor_info})
 
         if action == "restore":
             sha = p.get("sha256")
@@ -454,6 +507,7 @@ def main():
                 AUTH_EXPIRED = False
             CLIENT = c
             PROVIDER = auth.get("provider", "139")
+            _apply_msisdn(auth.get("token", ""))
         except Exception:
             CLIENT = None
     # 启动分享链接监控调度（3.0 模块三/四）

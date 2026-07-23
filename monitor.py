@@ -32,6 +32,13 @@ GEN_RETRY_WAIT = 30
 # ---- 与 app.py 解耦：通过 getter 读取实时登录态，避免循环 import ----
 _CLIENT_GETTER = None
 _EXPIRED_GETTER = None
+_PHONE = ""  # 手机号(msisdn)：139 转存接口必填，登录时由 app.py 注入
+
+
+def set_phone(phone):
+    """app.py 登录时把解码出的手机号(msisdn)注入，供 scan_one 转存使用。"""
+    global _PHONE
+    _PHONE = phone or ""
 
 
 def bind(app_module):
@@ -99,7 +106,8 @@ def scan_one(monitor):
         co_paths = [f["path"] for f in new_files]
         try:
             save_share_files(monitor["link_id"], co_paths, [], target_catalog,
-                             need_password=bool(monitor["pwd"]), token=client.token)
+                             need_password=bool(monitor["pwd"]), phone=_PHONE,
+                             token=client.token)
             added = len(new_files)
         except ShareError as e:
             if e.fatal:
