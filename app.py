@@ -280,6 +280,10 @@ class H(BaseHTTPRequestHandler):
 
         # ---------- [2.0] 分享链接一条龙 ----------
         if action == "share_parse":
+            if CLIENT is None:
+                return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
+            if AUTH_EXPIRED:
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
             text = (p.get("text") or "").strip()
             link_id, pwd = parse_share_input(text)
             if not link_id:
@@ -300,6 +304,10 @@ class H(BaseHTTPRequestHandler):
             })
 
         if action == "share_save":
+            if CLIENT is None:
+                return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
+            if AUTH_EXPIRED:
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
             text = (p.get("text") or "").strip()
             target = (p.get("target") or "root").strip() or "root"
             auto_cas = bool(p.get("auto_cas", False))

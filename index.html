@@ -216,10 +216,25 @@ setInterval(checkAuth, 60000);
 checkAuth();
 
 function dbg(o){ document.getElementById("debug").textContent = JSON.stringify(o, null, 2); }
-function api(payload){
-  return fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
-    .then(r=>r.json())
-    .then(d=>{ if(d && d.needLogin){ showAuthBanner(); } return d; });
+async function api(payload){
+  let r = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+    .then(r=>r.json());
+  if(r && r.needLogin){
+    showAuthBanner();
+    // 尝试自动重登：如果有本地缓存的 token，自动调用 login
+    const saved = readLocal("casgen_auth");
+    if(saved){
+      const prov = readLocal("casgen_prov") || "139";
+      const auth = await api({ action:"login", provider:prov, authorization:saved });
+      if(auth && auth.ok){
+        hideAuthBanner();
+        // 重试原请求
+        r = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
+          .then(r=>r.json());
+      }
+    }
+  }
+  return r;
 }
 function showAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="block"; }
 function hideAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="none"; }
