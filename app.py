@@ -369,13 +369,24 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
             try:
                 target_catalog = CLIENT.resolve_folder(target)
-                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
-                co_paths = [f["path"] for f in files]
-                ca_paths = []  # 当前只转存视频文件，不递归转存子目录
+                # 整文件夹转存：取分享根目录的顶层目录与文件，
+                # 顶层目录走 ca_path_lst（139 会连带子目录树+所有类型文件一起存，保留原结构），
+                # 顶层零散文件走 co_path_lst。这样整部《凡人修仙传》文件夹原样落到目标目录。
+                dirs, files = list_share_root_items(link_id, pwd, token=CLIENT.token)
+                ca_paths = [f"{d['parentCatalogID']}/{d['catalogID']}" for d in dirs]
+                co_paths = [f"{f['parentCatalogID']}/{f['contentID']}" for f in files]
+                if not ca_paths and not co_paths:
+                    return self._json({"ok": False, "error": "该分享内没有任何可转存的内容"})
                 res = save_share_files(link_id, co_paths, ca_paths, target_catalog,
                                        need_password=bool(pwd), phone=MSISDN,
                                        token=CLIENT.token)
-                saved = len(co_paths)
+                saved = len(ca_paths) + len(co_paths)
+                # 仅供前端展示：统计分享内视频总数
+                try:
+                    all_videos = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
+                    video_count = len(all_videos)
+                except Exception:
+                    video_count = None
                 cas_results = None
                 # [2.0+] 勾选「自动生成 CAS」则转存后直接对该目录生成 CAS，形成一条龙
                 if auto_cas:
@@ -398,7 +409,7 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": "转存失败：" + str(e)})
             return self._json({"ok": True, "targetCatalog": target_catalog,
-                               "saved": saved, "result": res,
+                               "saved": saved, "videoCount": video_count, "result": res,
                                "autoCas": auto_cas, "casResults": cas_results,
                                "addToMonitor": add_to_monitor, "monitor": monitor_info})
 

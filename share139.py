@@ -187,6 +187,43 @@ def list_all_share_files(link_id, pwd="", phone="", token=None, p_ca_id="root", 
     return all_files
 
 
+def list_share_root_items(link_id, pwd="", phone="", token=None, page_size=200):
+    """返回分享根目录的【顶层】目录与文件（带分页），用于「整文件夹转存」。
+
+    139 的批量转存接口 contentInfoList 转文件、catalogInfoList 转目录，
+    转目录时会连同其整个子目录树与所有类型文件一起保存，完美保留原结构。
+    所以整文件夹转存 = 把根目录的顶层目录都放进 ca_path_lst 即可
+    （顶层零散文件再补进 co_path_lst）。
+    """
+    dirs, files = [], []
+    start = 1
+    while True:
+        info = get_share_info(link_id, pwd, "root", start, start + page_size - 1, phone, token)
+        if not info:
+            break
+        for d in (info.get("caLst") or []):
+            cid = str(d.get("catalogID") or d.get("caID") or "")
+            if cid:
+                dirs.append({
+                    "catalogID": cid,
+                    "parentCatalogID": d.get("parentCatalogID") or d.get("pCaID") or "root",
+                    "name": d.get("catalogName") or d.get("caName") or "",
+                })
+        for f in (info.get("coLst") or []):
+            fid = str(f.get("contentID") or f.get("coID") or "")
+            if fid:
+                files.append({
+                    "contentID": fid,
+                    "parentCatalogID": f.get("parentCatalogID") or f.get("pCaID") or "root",
+                    "name": f.get("contentName") or f.get("coName") or "",
+                })
+        total = info.get("nodNum") or 0
+        if start + page_size - 1 >= total:
+            break
+        start += page_size
+    return dirs, files
+
+
 # ============================ 转存到自己云盘 ============================
 def save_share_files(link_id, co_path_lst, ca_path_lst, target_catalog_id,
                      need_password=False, phone="", token=None):

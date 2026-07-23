@@ -511,9 +511,13 @@ class Yun139:
     def generate(self, root, delete_source=False):
         """把原视频转成几 KB 的 .cas 文件，直接上传到 139 云盘的【原文件夹】里。
         .cas 只是一颗种子：含原文件的 sha256 哈希。恢复时靠这颗种子做秒传，把视频在云盘复活。
-        上传走完整三步（file/create → PUT → /file/complete），确保 .cas 真实显示在云盘，供光鸭版 OpenList 挂载播放。"""
+        上传走完整三步（file/create → PUT → /file/complete），确保 .cas 真实显示在云盘，供光鸭版 OpenList 挂载播放。
+        delete_source=True 时采用「先删原视频释放空间、再上传 .cas」两步法：139 免费云盘配额有限，
+        整部剧往往已撑满配额，若先传 .cas 再删视频，tiny .cas 也会因「资源配额不足(00010012)」失败；
+        先删大视频腾出空间，几 KB 的 .cas 即可顺利上传。"""
         results = []
         to_delete = []
+        records = []  # 待生成 .cas 的视频：(name, size, sha, parent, fid, contentHash)
         existing_cache = {}  # parent_fid -> {已存在的文件名}，避免重复生成 .cas（替代被 139 拒收的 overwrite）
         for it in self.iter_all(root):
             if self._is_folder(it):
@@ -549,7 +553,28 @@ class Yun139:
             if cas_name in cache:
                 results.append({"name": cas_name, "status": "skipped_existing"})
                 continue
-            content = self.build_cas(name, self._size(it), sha, it.get("contentHash", ""), parent)
+            ch = it.get("contentHash", "")
+            records.append((name, self._size(it), sha, parent, self._fid(it), ch))
+            if delete_source:
+                to_delete.append(self._fid(it))
+        # [配额友好] 勾选"删除原视频"时，先删大视频释放空间，再上传几 KB 的 .cas，
+        # 避免 139 免费云盘配额被整部剧撑满后，连 .cas 都因「资源配额不足(00010012)」传不进去。
+        # .cas 仅由 sha256+size 构成（无需原文件），删完视频仍可重建，安全可控。
+        if delete_source and to_delete:
+            # 分批删除（每批 100），避免 139 批量接口上限导致部分原视频残留、继续占用配额
+            ok_del = 0
+            for i in range(0, len(to_delete), 100):
+                batch = to_delete[i:i + 100]
+                try:
+                    self.delete(batch)
+                    ok_del += len(batch)
+                except Exception:
+                    pass
+            results.append({"name": f"[已删除 {ok_del}/{len(to_delete)} 个原视频]", "status": "deleted"})
+        # 上传 .cas（若已删原视频，此时空间已释放）
+        for (name, size, sha, parent, _, ch) in records:
+            cas_name = name + ".cas"
+            content = self.build_cas(name, size, sha, ch, parent)
             try:
                 up = self.upload_cas(cas_name, content, parent)
                 fid = up.get("_file_id") or up.get("fileId") or (up.get("data") or {}).get("fileId")
@@ -566,7 +591,7 @@ class Yun139:
                     "name": cas_name,
                     "status": status,
                     "sha256": sha,
-                    "size": self._size(it),
+                    "size": size,
                     "parent": parent,
                     "fileId": fid,
                     "verify_found": up.get("_verify_found"),
@@ -575,11 +600,6 @@ class Yun139:
                 })
             except Exception as e:
                 results.append({"name": cas_name, "status": "upload_failed", "error": str(e)})
-            if delete_source:
-                to_delete.append(self._fid(it))
-        if delete_source and to_delete:
-            dresp = self.delete(to_delete)
-            results.append({"name": f"[已删除 {len(to_delete)} 个原视频]", "status": "deleted", "detail": dresp})
         return results
 
     # ---------- [2.0] 分享转存：目标目录解析 ----------

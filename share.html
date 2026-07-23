@@ -49,7 +49,7 @@
   <span class="navspacer"></span>
 </nav>
 <h1>📥 分享链接一条龙 <span id="ver" class="muted"></span></h1>
-<p class="muted">解析分享链接 → 转存视频到云盘 →（可选）生成 CAS →（可选）加入监控，后续新剧集自动转 CAS 并删原视频。</p>
+<p class="muted">解析分享链接 → 整文件夹转存（含子目录与所有文件类型）→（可选）生成 CAS →（可选）加入监控，后续新剧集自动转 CAS 并删原视频。</p>
 
 <!-- 第 2 步：解析 + 转存 -->
 <div class="card">
@@ -168,10 +168,17 @@ document.getElementById("saveBtn").onclick = async () => {
                           auto_cas: autoCas, delete_source: del, add_to_monitor: monitor});
     dbg(d);
     if(!d.ok){ msg.innerHTML = '<span class="err">'+(d.error||"转存失败")+'</span>'; return; }
-    let s = '<span class="ok">转存完成：共 '+d.saved+' 个视频</span>';
+    let s = '<span class="ok">转存完成：共 '+d.saved+' 项（整文件夹，含子目录与所有文件类型）</span>';
+    if(d.videoCount!=null) s += '，分享内视频 '+d.videoCount+' 个';
     if(d.autoCas){
-      const c = (d.casResults||[]).filter(x=>x && x.status==="uploaded").length;
+      const cr = (d.casResults||[]);
+      const c = cr.filter(x=>x && x.status==="uploaded").length;
+      const fail = cr.filter(x=>x && x.status==="upload_failed").length;
       s += '，生成 .cas '+c+' 个'+(del?'，已删除原视频':'（原视频保留）');
+      if(fail){
+        s += '<br><span class="warn">⚠️ '+fail+' 个 .cas 因云盘配额不足（资源配额不足 00010012）上传失败：'
+           + '请勾选「生成后删除原视频」释放空间，或清理云盘后再试。</span>';
+      }
     }
     if(d.addToMonitor && d.monitor){
       if(d.monitor.error){
