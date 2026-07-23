@@ -54,7 +54,7 @@
 // ========== 从 localStorage 读取上次选择的文件夹 ==========
 const selRoot = readLocal("casgen_selected_root") || "root";
 const selName = readLocal("casgen_selected_name") || "根目录";
-document.getElementById("currentFolder").textContent = selName + " (\" + selRoot + \")\";
+document.getElementById("currentFolder").textContent = selName + " (" + selRoot + ")";
 
 let lastResults = []; // 缓存转换结果
 

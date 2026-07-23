@@ -33,12 +33,25 @@ GEN_RETRY_WAIT = 30
 _CLIENT_GETTER = None
 _EXPIRED_GETTER = None
 _PHONE = ""  # 手机号(msisdn)：139 转存接口必填，登录时由 app.py 注入
+_LOGGED_IN = False  # 是否已登录：调度器在首次登录成功前不扫描，避免后台 139 流量与登录抢资源
 
 
 def set_phone(phone):
     """app.py 登录时把解码出的手机号(msisdn)注入，供 scan_one 转存使用。"""
     global _PHONE
     _PHONE = phone or ""
+
+
+def mark_logged_in():
+    """app.py 登录/恢复登录成功后调用：解除调度器扫描闸门。"""
+    global _LOGGED_IN
+    _LOGGED_IN = True
+
+
+def reset_login():
+    """登录失效/退出时调用：再次暂停后台扫描。"""
+    global _LOGGED_IN
+    _LOGGED_IN = False
 
 
 def bind(app_module):
@@ -174,6 +187,8 @@ class MonitorScheduler(threading.Thread):
     def run(self):
         while not self._stop.is_set():
             time.sleep(60)
+            if not _LOGGED_IN:
+                continue  # 尚未登录：不扫描，避免后台 139 流量与登录抢资源
             if _expired():
                 continue  # 全局登录失效：暂停所有监控
             now = time.time()

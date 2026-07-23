@@ -177,14 +177,16 @@ class Yun139:
         h["mcloud-sign"] = f"{ts},{rnd},{sign}"
         return h
 
-    def _post_json(self, url, base_headers, body):
-        """发送 JSON POST，返回解析后的 dict；非 JSON 时返回 {'_raw': 文本}。"""
+    def _post_json(self, url, base_headers, body, timeout=20):
+        """发送 JSON POST，返回解析后的 dict；非 JSON 时返回 {'_raw': 文本}。
+        timeout 默认 20s：139 接口正常 <2s 返回，弱网/容器环境也应在 20s 内响应，
+        避免登录等请求无限挂起（否则前端一直显示"登录中…"）。"""
         body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         headers = self._sign_headers(base_headers, body_str)
         data = body_str.encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")

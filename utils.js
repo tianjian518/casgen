@@ -20,14 +20,22 @@ function writeLocal(k, v){
 }
 
 // ========== API 调用（含登录态失效检测 + 自动重登） ==========
+const API_TIMEOUT_MS = 90000;  // 前端超时：超过 90s 未响应视为失败，避免界面永远“处理中…”
 async function api(payload){
   let resp, r;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
   try {
-    resp = await fetch("/", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+    resp = await fetch("/", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload), signal: ctrl.signal});
     r = await resp.json();
   } catch(e){
+    clearTimeout(timer);
+    if (e && e.name === "AbortError"){
+      return {ok:false, error:"请求超时（>90秒无响应），请稍后重试。若持续超时，多为部署环境到 139 网络不畅。", needLogin:false};
+    }
     return {ok:false, error:"请求失败: "+e.message, needLogin:false};
   }
+  clearTimeout(timer);
   if(r && r.needLogin){
     // 触发自动重登逻辑（如果 index.html 定义了 doAutoReLogin）
     if(typeof doAutoReLogin === 'function'){
@@ -48,7 +56,7 @@ function hideAuthBanner(){ const b=document.getElementById("authBanner"); if(b) 
 // ========== 目录选择器（可复用的 mountFolderPicker） ==========
 // prefix: UI 元素 ID 前缀（如 "share"），targetInputId: 选中后回填的输入框 ID
 function mountFolderPicker(prefix, targetInputId){
-  let pick = {currentParent:"root", path:[["root","根目录"]]];
+  let pick = {currentParent:"root", path:[["root","根目录"]]};
   const picker = document.getElementById(prefix+"Picker");
   const crumb = document.getElementById(prefix+"Crumb");
   const folders = document.getElementById(prefix+"Folders");

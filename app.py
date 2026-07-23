@@ -210,6 +210,7 @@ class H(BaseHTTPRequestHandler):
                     PROVIDER = "139"
                     AUTH_EXPIRED = False
                     _apply_msisdn(auth)
+                    monitor.mark_logged_in()  # 用户主动登录成功 → 允许调度器开始扫描
                     _save_auth(auth, "139")
                     resp = {"ok": True, "provider": "139",
                             "version": VERSION,
@@ -491,10 +492,24 @@ def main():
         open(DEBUG_LOG, "w", encoding="utf-8").close()
     except Exception:
         pass
-    # 启动即恢复持久化的登录态（3.0 模块一）
-    auth = _load_auth()
-    if auth and auth.get("token"):
+    # ⚠️ 关键修复：HTTP 服务必须先启动并立即监听，绝不能被启动期网络调用阻塞。
+    # 旧逻辑（3.0+）在启动服务"之前"就调用 list_dir("root") 恢复登录态，
+    # 一旦部署环境（如飞牛 ARM 虚拟机）到 139 的网络慢/抖动，这次网络调用会卡住整个进程，
+    # 导致 HTTP 服务迟迟不监听 —— 用户点登录时请求一直排队，前端永远显示"登录中…"。
+    # 1.0/2.0 没有这段启动期网络调用，所以登录一直正常。
+    # 修复：先起服务并立即可用，登录态恢复改到后台线程异步做；调度器先启动但暂不扫描，
+    #       等首次登录成功后才开始，避免后台 139 流量与登录抢资源。
+    port = int(os.environ.get("PORT", "5000"))
+    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    monitor.bind(sys.modules[__name__])
+    monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
+
+    def _restore_auth():
+        """后台线程：异步恢复持久化登录态，绝阻塞 HTTP 服务启动。"""
         try:
+            auth = _load_auth()
+            if not auth or not auth.get("token"):
+                return
             c = Yun139(auth["token"])
             try:
                 c.list_dir("root")  # 轻量校验 token 是否仍有效
@@ -505,17 +520,16 @@ def main():
                 # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
                 # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登
                 AUTH_EXPIRED = False
+            global CLIENT, PROVIDER
             CLIENT = c
             PROVIDER = auth.get("provider", "139")
             _apply_msisdn(auth.get("token", ""))
+            monitor.mark_logged_in()  # 恢复成功 → 允许调度器开始扫描
         except Exception:
-            CLIENT = None
-    # 启动分享链接监控调度（3.0 模块三/四）
-    monitor.bind(sys.modules[__name__])
-    monitor.start_scheduler()
+            pass
 
-    port = int(os.environ.get("PORT", "5000"))
-    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    threading.Thread(target=_restore_auth, daemon=True).start()
+
     print("=" * 50)
     print("CAS 转换服务已启动")
     print(f"  本机浏览器打开： http://localhost:{port}")
