@@ -396,7 +396,8 @@ class Yun139:
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": cas_name,
             "type": "file",
-            "fileRenameMode": "overwrite",  # [2.0 修复] 覆盖同名 .cas，避免重复转换生成两份
+            # 注意：139 真机 /file/create 拒收 fileRenameMode 字段（任意取值均 04000002），
+            # 故不发送该字段；"已存在同名 .cas 跳过"改由 generate() 前置检查实现。
         }
         resp = self.personal_post("/file/create", body)
         if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
@@ -511,6 +512,7 @@ class Yun139:
         上传走完整三步（file/create → PUT → /file/complete），确保 .cas 真实显示在云盘，供光鸭版 OpenList 挂载播放。"""
         results = []
         to_delete = []
+        existing_cache = {}  # parent_fid -> {已存在的文件名}，避免重复生成 .cas（替代被 139 拒收的 overwrite）
         for it in self.iter_all(root):
             if self._is_folder(it):
                 continue
@@ -533,6 +535,18 @@ class Yun139:
             parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
             # cas 文件名 = 原文件名.cas（贴合光鸭版 OpenList 约定：靠文件名/内容还原原文件）
             cas_name = name + ".cas"
+            # 已存在同名 .cas 则跳过（139 真机 /file/create 拒收 fileRenameMode，故改用前置检查）
+            cache = existing_cache.get(parent)
+            if cache is None:
+                try:
+                    cit, _, _ = self.list_dir(parent)
+                    cache = {self._name(x) for x in cit}
+                except Exception:
+                    cache = set()
+                existing_cache[parent] = cache
+            if cas_name in cache:
+                results.append({"name": cas_name, "status": "skipped_existing"})
+                continue
             content = self.build_cas(name, self._size(it), sha, it.get("contentHash", ""), parent)
             try:
                 up = self.upload_cas(cas_name, content, parent)
@@ -577,7 +591,7 @@ class Yun139:
             "parentFileId": parent if parent not in ("root", "/") else "/",
             "name": name,
             "type": "folder",
-            "fileRenameMode": "overwrite",
+            "fileRenameMode": "force_rename",  # 139 真机仅接受 force_rename（overwrite 被拒）
         }
         d = self.personal_post("/file/create", body)
         dd = d.get("data") if isinstance(d, dict) else None
