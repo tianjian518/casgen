@@ -195,7 +195,11 @@ class H(BaseHTTPRequestHandler):
 
         if action == "list":
             parent = p.get("parent", "root")
-            items, _, data = CLIENT.list_dir(parent)
+            try:
+                items, _, data = CLIENT.list_dir(parent)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                return self._json({"ok": False, "error": f"获取目录列表失败：{str(e)}"}, 500)
             fmt = [self._fmt(i) for i in items]
             # 透传 139 原始 fileId，防止 _fmt 归一化在个别字段名下丢失，
             # 前端点击展开时用 it.fileId || it._rawId 兜底，避免 parent 为空退化成根目录。

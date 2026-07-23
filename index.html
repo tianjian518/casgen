@@ -206,7 +206,14 @@ function expandWorkspace(d){
   loadMonitors();
   const foldersEl = document.getElementById("folders");
   if(foldersEl && !foldersEl.children.length){
-    api({ action:"list", parent:"root" }).then(r=>{ dbg(r); renderFolders((r&&r.items)||[]); });
+    api({ action:"list", parent:"root" }).then(r=>{
+      dbg(r);
+      if (r && r.ok && Array.isArray(r.items)){
+        renderFolders(r.items);
+      } else {
+        foldersEl.innerHTML = '<span class="err">加载根目录失败：' + esc(r?.error || '未知错误') + '</span>';
+      }
+    });
   }
 }
 document.getElementById("bannerLoginBtn").onclick = () => {
@@ -290,8 +297,13 @@ function renderCrumb(){
 
 async function renderFolders(items){
   const el = document.getElementById("folders");
+  if (!items || !Array.isArray(items)){
+    console.warn("[renderFolders] 收到无效数据:", items);
+    items = [];
+  }
   el.innerHTML = "";
   (items||[]).forEach(it=>{
+    if (!it || typeof it !== "object") return;
     if (it.type !== "folder") return;
     const d = document.createElement("span");
     d.className = "folder";
@@ -305,7 +317,15 @@ async function renderFolders(items){
       state.currentParent = fid;
       state.path.push([fid, it.name]);
       const r = await api({ action:"list", parent: fid });
-      dbg(r); renderFolders(r.items||[]); renderCrumb();
+      dbg(r);
+      if (r && r.ok && Array.isArray(r.items)){
+        renderFolders(r.items);
+      } else {
+        alert("加载子目录失败：" + (r?.error || "未知错误"));
+        // 回滚
+        state.path.pop();
+      }
+      renderCrumb();
     };
     el.appendChild(d);
   });
@@ -565,13 +585,24 @@ function mountFolderPicker(prefix, targetInputId){
         pick.path = pick.path.slice(0, i+1);
         pick.currentParent = pick.path[i][0];
         const r = await api({ action:"list", parent: pick.currentParent });
-        dbg(r); renderFolders(r.items||[]); renderCrumb();
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)){
+          renderFolders(r.items);
+        } else {
+          alert("加载路径数据失败：" + (r?.error || "未知错误"));
+        }
+        renderCrumb();
       };
     });
   }
   async function renderFolders(items){
     folders.innerHTML = "";
-    (items||[]).forEach(it=>{
+    if (!items || !Array.isArray(items)){
+      folders.innerHTML = '<span class="err">加载失败，请重试</span>';
+      return;
+    }
+    items.forEach(it=>{
+      if (!it || typeof it !== "object") return;
       if (it.type !== "folder") return;
       const d = document.createElement("span");
       d.className = "folder";
@@ -582,7 +613,14 @@ function mountFolderPicker(prefix, targetInputId){
         pick.currentParent = fid;
         pick.path.push([fid, it.name]);
         const r = await api({ action:"list", parent: fid });
-        dbg(r); renderFolders(r.items||[]); renderCrumb();
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)){
+          renderFolders(r.items);
+        } else {
+          alert("加载子目录失败：" + (r?.error || "未知错误"));
+          pick.path.pop();
+        }
+        renderCrumb();
       };
       folders.appendChild(d);
     });
@@ -592,7 +630,13 @@ function mountFolderPicker(prefix, targetInputId){
     picker.style.display = "block";
     pick = { currentParent:"root", path:[["root","根目录"]] };
     const r = await api({ action:"list", parent:"root" });
-    dbg(r); renderFolders(r.items||[]); renderCrumb();
+    dbg(r);
+    if (r && r.ok && Array.isArray(r.items)){
+      renderFolders(r.items);
+    } else {
+      folders.innerHTML = '<span class="err">加载根目录失败：' + esc(r?.error || '未知错误') + '</span>';
+    }
+    renderCrumb();
     if (cur) cur.textContent = "";
   };
   document.getElementById(prefix+"Use").onclick = () => {
@@ -611,7 +655,11 @@ function mountFolderPicker(prefix, targetInputId){
     pick.path.push([r.fileId, name]);
     document.getElementById(prefix+"NewName").value = "";
     const r2 = await api({ action:"list", parent: r.fileId });
-    dbg(r2); renderFolders(r2.items||[]); renderCrumb();
+    dbg(r2);
+    if (r2 && r2.ok && Array.isArray(r2.items)){
+      renderFolders(r2.items);
+    }
+    renderCrumb();
     if (cur) cur.textContent = "已新建并进入：" + name;
   };
   document.getElementById(prefix+"Cancel").onclick = () => {
