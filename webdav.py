@@ -542,6 +542,22 @@ def handle_get(handler, schedule_cleanup_fn=None):
             handler.end_headers()
             return
 
+    # .cas 特殊处理：读取种子 → 秒传恢复 → 302 到 139 直链
+    # 这样播放器通过 WebDAV 挂载后，直接点 .cas 文件就能播放视频，无需先生成 .strm
+    if name.lower().endswith(".cas"):
+        try:
+            url, temp_fid = client.cas_get_play_link(fid, name)
+            if schedule_cleanup_fn and temp_fid:
+                schedule_cleanup_fn(temp_fid)
+            handler.send_response(302)
+            handler.send_header("Location", url)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        except Exception as e:
+            _send_webdav_error(handler, 500, "CAS 播放失败: %s" % e)
+            return
+
     # 普通文件：直接下载
     try:
         content = client.read_file_text(fid)

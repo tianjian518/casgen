@@ -692,12 +692,19 @@ class Yun139:
         return (dd or {}).get("fileId") or d.get("fileId")
 
     def get_download_link(self, file_id):
-        """对齐 OpenList 139 驱动 personalGetLink：POST /file/download -> data.downloadUrl。
-        返回可直接拉流的直链（播放器 302 直连，不耗 casgen 带宽）。【真机未实测，响应字段待确认】。"""
-        resp = self.personal_post("/file/download", {"fileId": file_id})
+        """对齐 OpenList 139 驱动 personalGetLink：POST /file/getDownloadUrl。
+        返回可直接拉流的直链（播放器 302 直连，不耗 casgen 带宽）。
+        优先返回 CDN 链接（cdnSwitch=true 时），否则返回普通链接。"""
+        resp = self.personal_post("/file/getDownloadUrl", {"fileId": file_id})
         if isinstance(resp, dict):
             d = resp.get("data") or {}
-            url = d.get("downloadUrl") or d.get("download_url") or d.get("url")
+            # CDN 链接优先（cdnSwitch=true 时 cdnUrl 可用）
+            cdn_url = d.get("cdnUrl") or ""
+            cdn_switch = d.get("cdnSwitch")
+            if cdn_url and cdn_switch:
+                return cdn_url
+            # 回退到普通链接
+            url = d.get("url") or d.get("downloadUrl") or d.get("download_url")
             if url:
                 return url
         raise Exception("139 获取下载直链失败: %r" % (resp,))
