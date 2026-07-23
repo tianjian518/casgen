@@ -158,7 +158,7 @@ class H(BaseHTTPRequestHandler):
             self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
 
     def route(self, p):
-        global CLIENT, PROVIDER, RECORDS
+        global CLIENT, PROVIDER, RECORDS, AUTH_EXPIRED
         action = p.get("action")
 
         if action == "login_status":
