@@ -78,6 +78,9 @@ document.getElementById("navFolder").textContent = selName + "（" + selRoot + "
 
 let lastResults = []; // 缓存转换结果
 
+// ========== 登录态检测 + 版本号 ==========
+window.addEventListener("load", ()=>{ initPage(); });
+
 // ========== 加载记录 ==========
 document.getElementById("loadRecordsBtn").onclick = () => loadRecords();
 
@@ -109,7 +112,7 @@ function renderRecords(results){
   tb.innerHTML = "";
   results.filter(x=>x.status==="uploaded").forEach(x=>{
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(x.size)+'</td><td class="muted">待恢复</td>';
+    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+fmtSize(x.size)+'</td><td class="muted">待恢复</td>';
     const td = document.createElement("td");
     const b = document.createElement("button");
     b.textContent = "恢复";

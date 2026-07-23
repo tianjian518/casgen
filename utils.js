@@ -50,8 +50,35 @@ async function api(payload){
 }
 
 // 登录态检测横幅
-function showAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="block"; }
+function showAuthBanner(){
+  // 如果页面有 authBanner 元素就显示；否则用 toast 提示（不阻塞操作）
+  const b=document.getElementById("authBanner");
+  if(b) b.style.display="block";
+  else showToast("登录已失效，请返回首页重新登录","warn",6000);
+}
 function hideAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="none"; }
+
+// ========== 子页面通用初始化：版本号 + 登录态检测 ==========
+// 在 <script src="utils.js"> 后的页面加载时调用，自动填充版本号并启动定时登录态检测。
+async function initPage(){
+  // 1) 填充版本号（从 /api/version 获取）
+  try {
+    const vr = await fetch("/api/version").then(r=>r.json()).catch(()=>null);
+    if(vr && vr.ok && vr.version){
+      const verEl = document.getElementById("ver");
+      if(verEl) verEl.textContent = "v"+vr.version;
+    }
+  } catch(e){}
+  // 2) 登录态检测（立即一次 + 每 60s 轮询）
+  async function _checkAuth(){
+    try{
+      const d = await api({action:"login_status"});
+      if(d && d.expired) showAuthBanner(); else hideAuthBanner();
+    }catch(e){}
+  }
+  _checkAuth();
+  setInterval(_checkAuth, 60000);
+}
 
 // ========== 目录选择器（可复用的 mountFolderPicker） ==========
 // prefix: UI 元素 ID 前缀（如 "share"），targetInputId: 选中后回填的输入框 ID
@@ -241,12 +268,19 @@ async function withLoading(btn, fn, loadingText="处理中…"){
 }
 
 // ========== 自动续登（搬到 utils.js，所有子页面都生效） ==========
+// 注意：login 请求使用裸 fetch 而非 api()，避免 needLogin 响应触发递归。
 async function doAutoReLogin(originalPayload){
   const saved = readLocal("casgen_auth");
   if(!saved) return null;
   const prov = readLocal("casgen_prov") || "139";
-  const loginR = await api({action:"login", provider:prov, authorization:saved});
-  if(!loginR || !loginR.ok) return null;
+  try {
+    const loginResp = await fetch("/", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({action:"login", provider:prov, authorization:saved})});
+    const loginR = await loginResp.json();
+    if(!loginR || !loginR.ok) return null;
+  } catch(e){
+    return {ok:false, error:"自动重登失败: "+e.message};
+  }
   try {
     const resp = await fetch("/", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(originalPayload)});
     return await resp.json();

@@ -79,11 +79,8 @@ const selName = readLocal("casgen_selected_name") || "根目录";
 document.getElementById("currentFolder").textContent = selName + " (" + selRoot + ")";
 document.getElementById("navFolder").textContent = selName + "（" + selRoot + "）";
 
-// ========== 登录态失效检测 ==========
-setInterval(async ()=>{
-  try{ const d = await api({action:"login_status"}); if(d && d.expired) showAuthBanner(); else hideAuthBanner(); }catch(e){}
-}, 60000);
-window.addEventListener("load", ()=>{ try{ api({action:"login_status"}).then(d=>{if(d&&d.expired)showAuthBanner();else hideAuthBanner();}); }catch(e){} });
+// ========== 登录态失效检测 + 版本号 ==========
+window.addEventListener("load", ()=>{ initPage(); });
 
 // ========== 分析功能 ==========
 document.getElementById("planBtn").onclick = async () => {

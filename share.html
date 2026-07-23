@@ -115,11 +115,8 @@
 // ========== 自动挂载目录选择器 ==========
 mountFolderPicker("share", "targetFolder");
 
-// ========== 登录态失效检测 ==========
-async function checkAuth(){
-  try{ const d = await api({action:"login_status"}); if(d && d.expired){ showToast("登录已失效，请返回首页重新登录","warn",6000); } }catch(e){}
-}
-setInterval(checkAuth, 60000);
+// ========== 登录态失效检测 + 版本号 ==========
+window.addEventListener("load", ()=>{ initPage(); });
 
 // ========== 勾选联动：删原视频 仅在 生成CAS 勾选时可选 ==========
 document.getElementById("autoCasChk").onchange = function(){
@@ -149,7 +146,7 @@ document.getElementById("parseBtn").onclick = async () => {
       const tb = document.querySelector("#parseTable tbody"); tb.innerHTML = "";
       (d.files||[]).forEach(f=>{
         const tr = document.createElement("tr");
-        tr.innerHTML = '<td>'+esc(f.name||"")+'</td><td>'+esc(String(f.size||""))+'</td>';
+        tr.innerHTML = '<td>'+esc(f.name||"")+'</td><td>'+fmtSize(f.size||0)+'</td>';
         tb.appendChild(tr);
       });
       saveBtn.disabled = (d.count === 0);

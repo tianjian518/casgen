@@ -50,7 +50,11 @@
 
 <div class="card">
   <h3>生成 .strm 文件</h3>
-  <label><input type="checkbox" id="recursiveChk"> 递归遍历子文件夹</label>
+  <div id="urlWarn" class="empty-cta" style="display:none; border-color:#fca5a5; background:#fef2f2;">
+    <div class="big" style="color:#991b1b;">⚠️ 未配置公网地址</div>
+    <div class="sub">CAS→Strm 功能需要环境变量 <code>CASGEN_PUBLIC_URL</code>（如 http://你的IP:5000），否则生成的 .strm 无法被播放器访问。</div>
+  </div>
+  <p class="muted">遍历所选文件夹下所有 .cas（含子目录），为每个生成同名 .strm，内容指向 casgen 网关播放地址。</p>
   <button id="genBtn">🚀 开始生成</button>
   <div id="convMsg" class="muted"></div>
   <table id="strmTable"><thead><tr><th>文件名</th><th>Status</th></tr></thead><tbody></tbody></table>
@@ -71,28 +75,34 @@ const selRoot = readLocal("casgen_selected_root") || "root";
 const selName = readLocal("casgen_selected_name") || "根目录";
 document.getElementById("navFolder").textContent = selName + "（" + selRoot + "）";
 
-// ========== 登录态失效检测 ==========
-setInterval(async ()=>{
-  try{ const d = await api({action:"login_status"}); if(d && d.expired)showAuthBanner(); else hideAuthBanner(); }catch(e){}
-}, 60000);
-window.addEventListener("load", ()=>{
-  try{ api({action:"login_status"}).then(d=>{if(d&&d.expired)showAuthBanner();else hideAuthBanner();}); }catch(e){}
+// ========== 页面加载：版本号+登录态 + 检查 PUBLIC_URL 配置 ==========
+window.addEventListener("load", async ()=>{
+  initPage();  // 版本号 + 登录态检测
+  // PUBLIC_URL 未配置时显示警告并禁用按钮
+  try {
+    const vr = await fetch("/api/version").then(r=>r.json()).catch(()=>null);
+    if(vr && vr.ok && !vr.publicUrlConfigured){
+      const warn = document.getElementById("urlWarn");
+      if(warn) warn.style.display = "block";
+      const btn = document.getElementById("genBtn");
+      if(btn){ btn.disabled = true; btn.textContent = "⚠️ 未配置公网地址，无法生成"; }
+    }
+  }catch(e){}
 });
 
 document.getElementById("genBtn").onclick = async () => {
   await withLoading(document.getElementById("genBtn"), async ()=>{
-    const recursive = document.getElementById("recursiveChk").checked;
     const msg = document.getElementById("convMsg");
     msg.textContent = "生成中…";
     try {
-      const r = await api({ action: "strm_create", root: selRoot, recursive });
+      const r = await api({ action: "strm_create", root: selRoot });
       dbg(r);
       if (!r.ok) { msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; showToast("生成失败："+r.error,"error",5000); return; }
+      // 后端返回 status: uploaded / skipped_existing / failed
       let ok=0, sk=0, err=0;
       (r.results||[]).forEach(x => {
-        if (x.status==="created") ok++;
+        if (x.status==="uploaded") ok++;
         else if (x.status==="skipped_existing") { sk++; ok++; }  // 已有算成功
-        else if (x.status==="skipped_no_cas") sk++;
         else err++;
       });
       msg.innerHTML = '<span class="ok">完成 ✔ 创建 '+ok+' 个（含已存在 '+sk+' 个），失败 '+err+' 个</span><br><span class="muted">已上传到原视频所在的云盘文件夹。.strm 内容指向网关：'+esc(r.publicUrl||"")+'/cas/&lt;路径&gt;</span>';

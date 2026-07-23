@@ -58,7 +58,7 @@
   <span class="navspacer"></span>
 </nav>
 
-<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.7</span></h1>
+<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.8</span></h1>
 <p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。</p>
 
 <!-- 使用三步 -->
@@ -207,8 +207,15 @@ async function checkAuth(){
 setInterval(checkAuth, 60000);
 checkAuth();
 
-// ========== 自动回填上次 token ==========
+// ========== 自动回填上次 token + 版本号 ==========
 window.addEventListener("load", ()=>{
+  // 自动填充版本号（不等登录，直接从 /api/version 取）
+  fetch("/api/version").then(r=>r.json()).then(v=>{
+    if(v && v.ok && v.version){
+      const el = document.getElementById("ver");
+      if(el) el.textContent = "v"+v.version;
+    }
+  }).catch(()=>{});
   const saved = readLocal("casgen_auth");
   if(saved){
     document.getElementById("auth").value = saved;

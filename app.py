@@ -148,6 +148,10 @@ class H(BaseHTTPRequestHandler):
         if self.path in html_paths:
             filename = self.path.lstrip("/") or "index.html"
             fpath = os.path.join(ROOT, filename)
+            # 防御路径穿越：确保解析后的绝对路径仍在 ROOT 内
+            if not os.path.abspath(fpath).startswith(os.path.abspath(ROOT)):
+                self._json({"error": "forbidden"}, 403)
+                return
             if not os.path.exists(fpath):
                 self._json({"error": f"{filename} 文件不存在"}, 404)
                 return
@@ -337,7 +341,8 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "version": VERSION, "results": res})
 
         # ---------- [4.0] CAS→Strm 批量生成 ----------
-        if action == "generate_strm":
+        # 前端 strm.html 发送 action:"strm_create"，兼容旧版 "generate_strm"
+        if action in ("generate_strm", "strm_create"):
             root = p.get("root", "root") or "root"
             public_url = (p.get("publicUrl") or os.environ.get("CASGEN_PUBLIC_URL", "")).strip()
             try:
@@ -394,8 +399,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"ok": False,
                                     "error": "未能从输入中解析出分享链接ID（形如 https://yun.139.com/shareweb/#/w/i/xxxx）"})
             try:
-                info = get_share_info(link_id, pwd, token=CLIENT.token)
-                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
+                info = get_share_info(link_id, pwd, phone=MSISDN, token=CLIENT.token)
+                files = list_all_share_files(link_id, pwd, phone=MSISDN, token=CLIENT.token, video_only=True)
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
@@ -430,7 +435,7 @@ class H(BaseHTTPRequestHandler):
                 # 整文件夹转存：取分享根目录的顶层目录与文件，
                 # 顶层目录走 ca_path_lst（139 会连带子目录树+所有类型文件一起存，保留原结构），
                 # 顶层零散文件走 co_path_lst。这样整部《凡人修仙传》文件夹原样落到目标目录。
-                dirs, files = list_share_root_items(link_id, pwd, token=CLIENT.token)
+                dirs, files = list_share_root_items(link_id, pwd, phone=MSISDN, token=CLIENT.token)
                 ca_paths = [f"{d['parentCatalogID']}/{d['catalogID']}" for d in dirs]
                 co_paths = [f"{f['parentCatalogID']}/{f['contentID']}" for f in files]
                 if not ca_paths and not co_paths:
@@ -441,7 +446,7 @@ class H(BaseHTTPRequestHandler):
                 saved = len(ca_paths) + len(co_paths)
                 # 仅供前端展示：统计分享内视频总数
                 try:
-                    all_videos = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
+                    all_videos = list_all_share_files(link_id, pwd, phone=MSISDN, token=CLIENT.token, video_only=True)
                     video_count = len(all_videos)
                 except Exception:
                     video_count = None
@@ -489,7 +494,8 @@ class H(BaseHTTPRequestHandler):
             target = (p.get("target") or "root").strip() or "root"
             auto_cas = bool(p.get("auto_cas", True))
             delete_source = bool(p.get("delete_source", False)) and auto_cas
-            interval = max(60, int(p.get("interval_min") or 60))
+            interval = max(monitor_store.MIN_INTERVAL,
+                           int(p.get("interval_min") or monitor_store.MIN_INTERVAL))
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
@@ -536,14 +542,14 @@ class H(BaseHTTPRequestHandler):
         # ID：兼容 139 个人云多种返回字段名（personal / personal_new / 旧版 contentID 等）
         fid = (i.get("fileId") or i.get("contentID") or i.get("id")
                or i.get("catalogId") or i.get("fid") or i.get("fileIdStr") or "")
-        # 文件夹判断：type=="folder"/"dir"，或 fileType/contentType 为数字 1/2（1=文件夹,2=文件），
-        # 或显式 isFolder 标记。原逻辑对数字 fileType 会 .lower() 抛 AttributeError，这里健壮化。
+        # 文件夹判断：type=="folder"/"dir"，或 fileType/contentType 为数字 1（1=文件夹, 2=文件），
+        # 或显式 isFolder 标记。
         t = i.get("type") or i.get("fileType") or i.get("contentType") or ""
         is_folder = False
         if isinstance(t, str):
             is_folder = t.strip().lower() in ("folder", "dir")
         elif isinstance(t, (int, float)):
-            is_folder = t in (1, 2)
+            is_folder = t == 1  # 1=文件夹, 2=文件
         if not is_folder and i.get("isFolder") is True:
             is_folder = True
         return {
@@ -579,7 +585,7 @@ def main():
     monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
 
     def _restore_auth():
-        """后台线程：异步恢复持久化登录态，绝阻塞 HTTP 服务启动。"""
+        """后台线程：异步恢复持久化登录态，绝不阻塞 HTTP 服务启动。"""
         try:
             auth = _load_auth()
             if not auth or not auth.get("token"):
@@ -589,7 +595,9 @@ def main():
                 c.list_dir("root")  # 轻量校验 token 是否仍有效
                 AUTH_EXPIRED = False
             except TokenExpired:
+                # token 已过期：不挂 CLIENT，标记失效让用户主动重登
                 AUTH_EXPIRED = True
+                return
             except Exception:
                 # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
                 # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登

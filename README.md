@@ -1,4 +1,4 @@
-# 移动云盘影视 CAS 瘦身工具（v4.7）
+# 移动云盘影视 CAS 瘦身工具（v4.8）
 
 把移动云盘里**已有的**原视频，零流量变成几 KB 的 `.cas` 文件；播放时从 `.cas` 临时恢复出原视频秒传回云盘。
 全部在浏览器里用鼠标操作，**不需要命令行、不需要改代码、不需要联网装任何东西**。
@@ -188,7 +188,17 @@ casgen/
 
 ## 十一、版本说明
 
-- **v4.7.0（当前）**：全面打磨 ——
+- **v4.8.0（当前）**：全面调试修复 ——
+  - **关键 Bug**：`strm.html` 前端发送 `action:"strm_create"` 但后端只认 `"generate_strm"`（Strm 页面按钮永远报"未知操作"）→ 统一双向兼容；前端 status 字段 `"created"`/`"skipped_no_cas"` 与后端 `"uploaded"`/`"skipped_existing"` 不匹配 → 统一。
+  - **文件夹判断**：`yidong._is_folder()` 对数字类型 `fileType` 调 `.lower()` 抛 `AttributeError` → 健壮化（str+int+isFolder 三路兼容）；`app._fmt()` 把数字 1 和 2 都当文件夹（2=文件被误判）→ 修正为仅 1=文件夹。
+  - **自动重登递归**：`api()` 检测 `needLogin` → 调 `doAutoReLogin()` → 内部调 `api(login)` → 若 login 也 `needLogin` 则无限递归 → `doAutoReLogin` 改用裸 `fetch` 发 login 请求。
+  - **登录态恢复**：`_restore_auth()` token 过期时仍把 CLIENT 挂上（后续操作全失败）→ token 过期直接 return 不挂 CLIENT。
+  - **前端统一**：5 个子页面版本号 `<span id="ver">` 从未赋值 → `utils.js` 新增 `initPage()` 自动从 `/api/version` 填充 + 启动登录态定时检测；`authBanner` 元素所有页面都不存在导致 `showAuthBanner()` 静默失效 → 改为无元素时 `showToast` 提示。
+  - **Strm 页 UX**：未配置 `CASGEN_PUBLIC_URL` 时页面加载即显示醒目警告并禁用按钮（之前要点"生成"才报错）；去掉无用的"递归遍历" checkbox（后端 `walk()` 本身递归）。
+  - **数据一致性**：`monitor_add` interval 硬编码 `60` → 统一用 `monitor_store.MIN_INTERVAL`；`share_parse`/`share_save` 未传 `phone`/`MSISDN` 给 139 分享接口 → 补传。
+  - **安全加固**：静态文件服务路径拼接加 `abspath` 前缀检查（防御路径穿越）。
+  - **表格友好显示**：`restore.html`/`share.html` 表格 size 列从原始字节数 → `fmtSize()` 友好格式。
+- **v4.7.0**：全面打磨 ——
   - **UX**：全局 toast 通知、按钮 loading 态、危险操作（rename 执行 / restore / 删除监控）确认弹窗、所有子页面"登录失效"自动续登（utils.js 统一 doAutoReLogin）、移动端响应式（toast + nav + table 横向滚动）、首页"使用三步" onboarding、友好空状态。
   - **工程稳健**：优雅停机（SIGTERM/SIGINT → 停调度器 → 关服务，Docker stop 干净退出）、请求日志带耗时（`METHOD path -> code (B, ms)`）、`/api/health` + `/api/version` 健康检查端点、启动期配置校验（端口合法性 + `CASGEN_PUBLIC_URL` 提示）、`yidong._post_json` 指数退避重试（连接错误/超时/5xx，4xx 不重试）、`handle()` 捕获 `BrokenPipeError` 防客户端断连报错、响应头 `Cache-Control: no-store` 防止前端缓存。
   - **DevOps**：Dockerfile 改为**非 root 用户**运行 + HEALTHCHECK（`healthcheck.py` 探针）；GitHub Actions 加 **smoke test** 步骤（启动镜像 → 访问 `/api/health` + `/api/version` → 通过才算构建成功）。

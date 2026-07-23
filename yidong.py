@@ -31,8 +31,8 @@ VIDEO_EXT = {
 }
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
-# 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
-__version__ = "4.7.0"
+# 4.8.0：strm_create action 修复 + _is_folder 数字类型修复 + doAutoReLogin 递归修复 + 子页面版本号/authBanner 统一 + 路径穿越防御 + _restore_auth token过期不挂CLIENT + share phone传递 + monitor_add interval 统一
+__version__ = "4.8.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -294,8 +294,16 @@ class Yun139:
     # ---------- 字段归一化（兼容多种命名） ----------
     @staticmethod
     def _is_folder(it):
-        t = (it.get("type") or it.get("fileType") or it.get("contentType") or "").lower()
-        return t in ("folder", "dir")
+        """判断是否文件夹，兼容字符串和数字类型。
+        139 API 数字类型：1=文件夹, 2=文件；字符串类型：folder/dir。"""
+        t = it.get("type") or it.get("fileType") or it.get("contentType") or ""
+        if isinstance(t, str):
+            return t.strip().lower() in ("folder", "dir")
+        if isinstance(t, (int, float)):
+            return t == 1  # 1=文件夹, 2=文件
+        if it.get("isFolder") is True:
+            return True
+        return False
 
     @staticmethod
     def _name(it):
