@@ -217,20 +217,29 @@ checkAuth();
 
 function dbg(o){ document.getElementById("debug").textContent = JSON.stringify(o, null, 2); }
 async function api(payload){
-  let r = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
-    .then(r=>r.json());
+  let resp, r;
+  try {
+    resp = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+    r = await resp.json();
+  } catch(e){
+    return { ok:false, error:"请求失败: "+e.message, needLogin:false };
+  }
   if(r && r.needLogin){
     showAuthBanner();
     // 尝试自动重登：如果有本地缓存的 token，自动调用 login
     const saved = readLocal("casgen_auth");
     if(saved){
       const prov = readLocal("casgen_prov") || "139";
-      const auth = await api({ action:"login", provider:prov, authorization:saved });
-      if(auth && auth.ok){
+      const loginR = await api({ action:"login", provider:prov, authorization:saved });
+      if(loginR && loginR.ok){
         hideAuthBanner();
-        // 重试原请求
-        r = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) })
-          .then(r=>r.json());
+        // 重试原请求：直接用 fetch 避免递归调用 api 再次进入 auto-relogin
+        try {
+          resp = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+          r = await resp.json();
+        } catch(e2){
+          return { ok:false, error:"请求失败: "+e2.message, needLogin:false };
+        }
       }
     }
   }
