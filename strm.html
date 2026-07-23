@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CAS → Strm 批量生成 - 网盘影视转CAS工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button:disabled { background:#9ca3af; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .err { color:#dc2626; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+  a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<h1>🎞️ CAS → Strm 批量生成 <span id="ver" class="muted"></span></h1>
+<p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」选定文件夹后，回到这里生成 strm 文件（支持递归遍历子文件夹）。</p>
+
+<div class="card">
+  <h3>生成 .strm 文件</h3>
+  <label><input type="checkbox" id="recursiveChk"> 递归遍历子文件夹</label>
+  <button id="genBtn">🚀 开始生成</button>
+  <div id="convMsg" class="muted"></div>
+  <table id="strmTable"><thead><tr><th>文件名</th><th>Status</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script src="utils.js"></script>
+<script>
+// ========== 从 localStorage 读取上次选择的文件夹 ==========
+const selRoot = readLocal("casgen_selected_root") || "root";
+const selName = readLocal("casgen_selected_name") || "根目录";
+
+// ========== 登录态失效检测 ==========
+setInterval(async ()=>{
+  try{ const d = await api({action:"login_status"}); if(d && d.expired)showAuthBanner(); else hideAuthBanner(); }catch(e){}
+}, 60000);
+window.addEventListener("load", ()=>{
+  try{ api({action:"login_status"}).then(d=>{if(d&&d.expired)showAuthBanner();else hideAuthBanner();}); }catch(e){}
+});
+
+document.getElementById("genBtn").onclick = async () => {
+  const recursive = document.getElementById("recursiveChk").checked;
+  const msg = document.getElementById("convMsg");
+  msg.textContent = "生成中…";
+  try {
+    const r = await api({ action: "strm_create", root: selRoot, recursive });
+    dbg(r);
+    if (!r.ok) { msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
+    let ok=0, sk=0, err=0;
+    (r.results||[]).forEach(x => {
+      if (x.status==="created") ok++;
+      else if (x.status==="skipped_no_cas") sk++;
+      else err++;
+    });
+    msg.innerHTML = '<span class="ok">完成 ✔ 创建 '+ok+' 个，跳过 '+sk+' 个，失败 '+err+' 个</span><br><span class="muted">已上传到原视频所在的云盘文件夹</span>';
+    const tb=document.querySelector("#strmTable tbody"); tb.innerHTML="";
+    (r.results||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      tr.innerHTML="<td>"+esc(x.name)+"</td><td class='ok'>✔"+esc(x.status)+"</td>";
+      tb.appendChild(tr);
+    });
+  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+</script>
+</body>
+</html>

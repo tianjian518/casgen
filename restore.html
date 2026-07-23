@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>恢复播放 - 网盘影视转CAS工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button.danger { background:#dc2626; }
+  button:disabled { background:#9ca3af; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .err { color:#dc2626; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+  a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<h1>▶️ 从 .cas 恢复播放 <span id="ver" class="muted"></span></h1>
+<p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」转换出 .cas 后，如果需要临时恢复原视频回云盘观看，点"恢复"即可。</p>
+
+<!-- 恢复播放 -->
+<div class="card" id="restoreCard">
+  <h3>恢复 .cas 对应的原视频</h3>
+  <p class="muted">当前文件夹：<b id="currentFolder">未选择</b></p>
+  <button id="loadRecordsBtn">🔄 加载最近转换记录</button>
+  <div class="row" style="margin-top:8px;">
+    <label><input type="checkbox" id="autoLoad"> 页面加载时自动读取上次记录</label>
+  </div>
+  <table id="recTable"><thead><tr><th>文件名</th><th>大小</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script src="utils.js"></script>
+<script>
+// ========== 从 localStorage 读取上次选择的文件夹 ==========
+const selRoot = readLocal("casgen_selected_root") || "root";
+const selName = readLocal("casgen_selected_name") || "根目录";
+document.getElementById("currentFolder").textContent = selName + " (\" + selRoot + \")\";
+
+let lastResults = []; // 缓存转换结果
+
+// ========== 加载记录 ==========
+document.getElementById("loadRecordsBtn").onclick = () => loadRecords();
+
+function loadRecords(){
+  const msg = document.createElement("div");
+  msg.className = "muted";
+  msg.textContent = "加载中…";
+  const tb = document.querySelector("#recTable tbody");
+  tb.parentElement.insertBefore(msg, tb);
+  
+  try{
+    const cached = readLocal("casgen_last_results");
+    if(cached){
+      lastResults = JSON.parse(cached);
+      renderRecords(lastResults);
+      msg.textContent = "已从本地缓存加载 " + lastResults.length + " 条记录";
+      setTimeout(()=>msg.remove(), 3000);
+    } else {
+      msg.innerHTML = '<span class="err">本地没有缓存记录。请先在「分析+转换CAS」页面执行转换，或手动粘贴 JSON。</span>';
+    }
+  } catch(e){
+    msg.innerHTML = '<span class="err">解析本地记录失败：'+esc(e.message)+'</span>';
+  }
+}
+
+// ========== 渲染记录表格 ==========
+function renderRecords(results){
+  const tb = document.querySelector("#recTable tbody");
+  tb.innerHTML = "";
+  results.filter(x=>x.status==="uploaded").forEach(x=>{
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(x.size)+'</td><td class="muted">待恢复</td>';
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.textContent = "恢复";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "恢复中…";
+      const r = await api({action:"restore", sha256:x.sha256, size:x.size, name:x.name.replace(/\.cas$/,""), parent:x.parent});
+      dbg(r);
+      if(r.ok){
+        b.textContent = "已恢复 ✔";
+        tr.querySelector("td:nth-child(3)").innerHTML = '<span class="ok">✔ 已恢复</span>';
+      } else {
+        b.textContent = "失败";
+        tr.querySelector("td:nth-child(3)").innerHTML = '<span class="err">✘ '+esc(r.error)+'</span>';
+      }
+    };
+    td.appendChild(b);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+  if(!tb.children.length) tb.innerHTML = '<tr><td colspan="4" class="muted">暂无可恢复的记录。请先执行转换操作。</td></tr>';
+}
+
+// ========== 自动加载 ==========
+document.getElementById("autoLoad").addEventListener("change", ()=>{
+  if(document.getElementById("autoLoad").checked){
+    const cached = readLocal("casgen_last_results");
+    if(cached){
+      try{
+        lastResults = JSON.parse(cached);
+        renderRecords(lastResults);
+      }catch(e){}
+    }
+  }
+});
+
+// 页面加载时如果勾选了自动加载，则触发
+window.addEventListener("load", ()=>{
+  if(document.getElementById("autoLoad").checked){
+    loadRecords();
+  }
+});
+</script>
+</body>
+</html>

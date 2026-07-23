@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L1 正则重命名 - 网盘影视转CAS工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button.danger { background:#dc2626; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .err { color:#dc2626; } .warn { color:#d97706; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+  a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<h1>✏️ L1 本地正则重命名 <span id="ver" class="muted"></span></h1>
+<p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」选定文件夹后，回到这里对 .cas 文件名执行正则匹配改名。</p>
+
+<!-- L1 重命名 -->
+<div class="card" id="renameCard">
+  <h3>第 6 步：L1 正则重命名</h3>
+  <p class="muted">当前文件夹：<b id="currentFolder">未选择</b></p>
+  <p class="muted">会遍历所选文件夹下所有 .cas，按内置正则规则匹配并改名。</p>
+  <div class="row">
+    <button id="renamePreviewBtn">① 预览（只读，不改云盘）</button>
+    <button id="renameExecBtn" class="danger">② 执行改名（修改云盘）</button>
+  </div>
+  <div id="renameMsg"></div>
+  <table id="renameTable"><thead><tr><th>原文件名</th><th></th><th>新文件名</th><th>状态</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script src="utils.js"></script>
+<script>
+// ========== 从 localStorage 读取上次选择的文件夹 ==========
+const selRoot = readLocal("casgen_selected_root") || "root";
+const selName = readLocal("casgen_selected_name") || "根目录";
+document.getElementById("currentFolder").textContent = selName + " (" + selRoot + ")";
+
+// ========== 重命名逻辑 ==========
+async function doRename(dry){
+  const root = readLocal("casgen_selected_root") || "root";
+  const msg = document.getElementById("renameMsg");
+  msg.innerHTML = dry ? "预览中（只读，不改云盘）…" : "改名中…";
+  try{
+    const r = await api({action:"rename_l1", root:root, dryRun:dry});
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    if(dry){
+      msg.innerHTML = '<span class="ok">预览完成 ✔ 共 '+(r.renamed+r.skipped+r.failed)+' 个 .cas，其中可改名 '+r.renamed+' 个（未改云盘）</span>';
+    } else {
+      msg.innerHTML = '<span class="ok">完成 ✔ 改名 '+r.renamed+' 个，跳过 '+r.skipped+' 个，失败 '+r.failed+' 个</span>';
+    }
+    const tb = document.querySelector("#renameTable tbody");
+    tb.innerHTML = "";
+    (r.results||[]).forEach(x=>{
+      const tr = document.createElement("tr");
+      let st;
+      if(x.status==="renamed") st = '<span class="ok">✔ 已改</span>';
+      else if(x.status==="skip") st = '<span class="muted">— 无需改</span>';
+      else if(x.status==="preview") st = '<span class="muted">待执行</span>';
+      else st = '<span class="err">✘ '+esc(x.error||"失败")+'</span>';
+      tr.innerHTML = "<td>"+esc(x.old)+"</td><td>→</td><td>"+esc(x.new)+"</td><td>"+st+"</td>";
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="4" class="muted">没有 .cas 文件</td></tr>';
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+}
+
+document.getElementById("renamePreviewBtn").onclick = ()=> doRename(true);
+document.getElementById("renameExecBtn").onclick = ()=> doRename(false);
+</script>
+</body>
+</html>

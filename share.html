@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分享链接解析转存 - 网盘影视转CAS工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  textarea, input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button:disabled { background:#9ca3af; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .err { color:#dc2626; } .warn { color:#d97706; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+  a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<h1>🔗 分享链接解析 & 转存 <span id="ver" class="muted"></span></h1>
+<p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」输入认证信息后，回到这里解析分享链接并转存视频文件。</p>
+
+<!-- 分享链接解析 -->
+<div class="card">
+  <h3>第 2 步：分享链接解析（转存视频到云盘）</h3>
+  <p class="muted">当前已配置公共地址：<b id="pubUrl">未配置</b></p>
+  <textarea id="shareText" rows="6" placeholder="复制一个或多个链接，每行一个。如：&#10;https://www.aliyundrive.com/s/xxxx  （单个链接）&#10;https://www.aliyundrive.com/s/xxxx  1234&#10;https://www.aliyundrive.com/s/yyyy abcd"></textarea>
+  <label><input type="checkbox" id="delChk" checked> 转存后删除原分享中文件（节省空间）</label>
+  <button id="parseBtn">🔍 一键解析（提取链接→转存→生成文件列表）</button>
+  <div id="parseMsg"></div>
+  <table id="parseTable"><thead><tr><th>文件名</th><th>大小</th><th>Status</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 监控管理 -->
+<div class="card" id="monCard">
+  <h3>第 3 步：监控新上传文件</h3>
+  <div class="row">
+    <button id="monBtn" class="sec">开启/暂停</button>
+    <button id="statBtn">📊 状态</button>
+    <span id="monStatus" class="muted">未启动</span>
+    <label>自动刷新（每3秒）<input type="checkbox" id="autoRefresh" checked></label>
+    <label>静音<input type="checkbox" id="silenceMon"></label>
+    <button id="clearLogBtn" class="sec" style="margin-left:auto">清除日志</button>
+  </div>
+  <details>
+    <summary>查看日志</summary>
+    <pre id="logContent"></pre>
+  </details>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script src="utils.js"></script>
+<script>
+// ========== 从 localStorage 读取上次选择的公共 URL ==========
+const pubUrl = readLocal("casgen_public_url") || "";
+document.getElementById("pubUrl").textContent = pubUrl || "未配置";
+
+let monId = null;
+let autoTimer = null;
+
+// ========== 解析逻辑 ==========
+async function doParse(){
+  const txt = document.getElementById("shareText").value.trim();
+  if(!txt) { alert("请填写至少一个分享链接"); return; }
+  const msg = document.getElementById("parseMsg");
+  msg.innerHTML = "正在解析…";
+  try {
+    const d = await api({action:"split_share", text: txt, public_url: pubUrl});
+    dbg(d);
+    if (!d.ok){
+      msg.innerHTML='<span class="err">'+esc(d.error)+'</span>';
+      return;
+    }
+    let ok=0,dn=0,sk=0,rm=0,pz=0,errN=0,failD=0;
+    (d.list||[]).forEach(i=>{
+      if(i.status==="ok") ok++;
+      else if(i.status==="downloaded") dn++;
+      else if(i.status==="no_need_to_download") sk++;
+      else if(i.status==="removed_no_size") rm++;
+      else if(i.status==="pending_download") pz++;
+      else if(i.status==="err_no_name") errN++;
+      else if(i.status==="fail_download") failD++;
+    });
+    msg.innerHTML='<b>处理完成！</b> 解析通过 '+ok+'，下载'+dn+'，跳过'+sk+'，无大小删'+rm+'，待下载'+pz+'，无文件名错'+errN+'，下载失败'+failD;
+    const tb=document.querySelector("#parseTable tbody"); tb.innerHTML="";
+    (d.list||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      const c={ok:"✔",downloaded:"⬇",removed_no_size:"🗑",pending_download:"⏳",no_need_to_download:"—",err_no_name:'<span class="err">✘</span>',fail_download:'<span class="err">✘</span>'};
+      tr.innerHTML='<td>'+esc(x.name)+'</td><td>'+esc(String(x.size||""))+'</td><td>'+(c[x.status]||x.status)+'</td>';
+      tb.appendChild(tr);
+    });
+  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+}
+
+document.getElementById("parseBtn").onclick = ()=>{
+  const txt=document.getElementById("shareText").value.trim();
+  if(!txt){alert("请粘贴一个或多个链接，每行一个，可带密码");return;}
+  doParse();
+};
+
+// ========== 监控状态文本 ==========
+function monStatusText(r){
+  if(!r) return "未知";
+  switch(r.status){
+    case 1: return "运行中";
+    case 0: return "已暂停";
+    case -1: return "已完成";
+    default: return "状态"+r.status;
+  }
+}
+
+// ========== 登录态 Banner ==========
+function showAuthBanner(){
+  let b=document.getElementById("auth-banner");
+  if(!b){ b=document.createElement("div"); b.id="auth-banner"; b.style.cssText="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:10px;margin:12px 0;font-size:13px;"; b.innerHTML="<b>⚠️ 登录凭证已过期，请重新认证</b><br><label>地址:</label><input type=text id=authProv placeholder=https://xxx style=width:100%;padding:6px;margin:4px 0><label>用户名:</label><input type=text id=authUser style=width:100%;padding:6px;margin:4px 0><label>密码:</label><input type=text id=authPwd style=width:100%;padding:6px;margin:4px 0><button onclick=doAuth() style=margin-top:8px>认证</button>"; document.body.prepend(b); }
+}
+function hideAuthBanner(){ const b=document.getElementById("auth-banner"); if(b) b.remove(); }
+async function doAuth(){
+  const prov=readLocal("casgen_selected_root")||"root";
+  const d=await api({action:"login",public_url:pubUrl,username:document.getElementById("authUser").value.trim(),password:document.getElementById("authPwd").value.trim(),provider:document.getElementById("authProv").value.trim()});
+  dbg(d); hideAuthBanner();
+}
+// ========== 监控逻辑 ==========
+document.getElementById("monBtn").onclick = async () => {
+  try {
+    const r = await api({ action: monId ? "monitor_stop" : "monitor_start", parent: pubUrl });
+    dbg(r);
+    document.getElementById("monStatus").textContent = monStatusText(r);
+    if (monId) { monId = null; document.getElementById("monBtn").textContent = "开启/暂停"; }
+    else monId = r.id;
+  } catch(e) { alert("请求出错: "+e); }
+};
+
+document.getElementById("statBtn").onclick = async () => {
+  try {
+    const r = await api({ action: "monitor_status", parent: pubUrl });
+    dbg(r);
+    document.getElementById("monStatus").textContent = monStatusText(r);
+  } catch(e) { alert("请求出错: "+e); }
+};
+
+document.getElementById("clearLogBtn").onclick = () => { document.getElementById("logContent").textContent = "(已清除)"; };
+
+function updateMon() {
+  if (!monId) return;
+  const auto = document.getElementById("autoRefresh");
+  const sil = document.getElementById("silenceMon");
+  (async()=>{
+    try {
+      const r = await api({action:"monitor_status",parent:pubUrl});
+      dbg(r);
+      if(r && r.items && r.items.length){
+        const logEl = document.getElementById("logContent");
+        if(logEl.textContent==="" || logEl.textContent==="\n"){
+          if(!sil.checked){ try { new Audio("https://cdn.jsdelivr.net/npm/wav-synthesis/src/wav-synthesis.demos.min.js").play(); }catch(e){} }
+        }
+        r.items.forEach(it => {
+          logEl.textContent += "[Monitor:"+r.id+"] " + JSON.stringify(it) + "\n";
+        });
+      }
+      document.getElementById("monStatus").textContent = monStatusText(r)+" ["+((r.uploadedBytes||0)/1e6).toFixed(1)+" MB]";
+    } catch(e){
+      if(auto.checked) document.getElementById("monStatus").textContent="轮询出错："+e.message+" | 重试中…";
+    }
+  })();
+}
+
+document.getElementById("autoRefresh").onchange = function(){
+  if(this.checked && monId) autoTimer = setInterval(updateMon, 3000);
+  else clearInterval(autoTimer);
+};
+document.getElementById("silenceMon").onchange = function(){/* silence changed */};
+
+setInterval(()=>{
+  if(monId && document.getElementById("autoRefresh").checked) updateMon();
+}, 3000);
+window.addEventListener("load", ()=>{
+  try { api({action:"login_status"}).then(d=>{if(d&&d.expired)showAuthBanner();else hideAuthBanner();}); } catch(e){}
+});
+</script>
+</body>
+</html>

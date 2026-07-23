@@ -74,18 +74,26 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            try:
-                with open(INDEX, "rb") as f:
-                    body = f.read()
-            except Exception:
-                self._json({"error": "index.html 缺失，请确认它和 app.py 在同一目录"}, 500)
+        # 静态 HTML 文件服务
+        html_paths = ("/", "/index.html", "/convert.html", "/share.html", "/strm.html",
+                      "/restore.html", "/rename.html", "/utils.js")
+        if self.path in html_paths:
+            filename = self.path.lstrip("/") or "index.html"
+            fpath = os.path.join(ROOT, filename)
+            if not os.path.exists(fpath):
+                self._json({"error": f"{filename} 文件不存在"}, 404)
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                with open(fpath, "rb") as f:
+                    body = f.read()
+                ctype = "text/html; charset=utf-8" if filename.endswith(".html") else "application/javascript; charset=utf-8"
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
         elif self.path.startswith("/cas/"):
             self.handle_cas(self.path[len("/cas/"):])
         else:

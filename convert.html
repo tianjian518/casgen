@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分析+转换CAS - 网盘影视转CAS工具</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
+  h1 { font-size: 20px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  label { display:block; margin:8px 0 4px; font-weight:600; }
+  textarea, input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
+  button.sec { background:#6b7280; }
+  button.danger { background:#dc2626; }
+  button:disabled { background:#9ca3af; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
+  .ok { color:#16a34a; } .warn { color:#d97706; } .err { color:#dc2626; }
+  .muted { color:#6b7280; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
+  a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
+  a.back:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<h1>🔄 分析并转换 CAS <span id="ver" class="muted"></span></h1>
+<p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」选定要处理的文件夹后，回到这里执行分析或转换。</p>
+
+<!-- 步骤3：分析 + 转换 -->
+<div class="card" id="opCard">
+  <h3>第 3 步：分析并转换</h3>
+  <div class="row">
+    <button id="planBtn">① 先分析（看看哪些能转）</button>
+    <button id="convertBtn" class="danger">② 开始转换（生成 .cas）</button>
+  </div>
+  <p class="muted">当前处理文件夹：<b id="currentFolder">未选择</b></p>
+  <p class="muted">转换后，会在每个原视频<b>所在的文件夹</b>里生成一个同名 .cas 文件（几 KB，零流量）。原视频仍在云盘，删不删由你决定。<b>之后用光鸭版 OpenList 挂载这个云盘，就能直接点 .cas 播放。</b></p>
+  <label style="margin-top:10px"><input type="checkbox" id="delChk"> 生成后删除原视频（⚠️ 先不勾，确认 .cas 能恢复再勾）</label>
+  <div id="planMsg"></div>
+  <div id="convMsg"></div>
+</div>
+
+<!-- 调试区 -->
+<div class="card">
+  <details>
+    <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
+    <pre id="debug">（空）</pre>
+  </details>
+</div>
+
+<script src="utils.js"></script>
+<script>
+// ========== 从 localStorage 读取上次选择的文件夹 ==========
+const selRoot = readLocal("casgen_selected_root") || "root";
+const selName = readLocal("casgen_selected_name") || "根目录";
+document.getElementById("currentFolder").textContent = selName + " (" + selRoot + ")";
+
+// ========== 登录态失效检测 ==========
+setInterval(async ()=>{
+  try{ const d = await api({action:"login_status"}); if(d && d.expired) showAuthBanner(); else hideAuthBanner(); }catch(e){}
+}, 60000);
+window.addEventListener("load", ()=>{ try{ api({action:"login_status"}).then(d=>{if(d&&d.expired)showAuthBanner();else hideAuthBanner();}); }catch(e){} });
+
+// ========== 分析功能 ==========
+document.getElementById("planBtn").onclick = async () => {
+  const msg = document.getElementById("planMsg");
+  msg.innerHTML = "分析中（可能要遍历很多文件，请稍候）…";
+  try {
+    const r = await api({action:"plan", root:selRoot});
+    dbg(r);
+    if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
+    let s = '可生成 .cas ：<b>'+r.can_count+'</b> 个；跳过（云端无 SHA256）：<b>'+r.skip_count+'</b> 个。<br>';
+    if (r.skip && r.skip.length){
+      s += '<span class="muted">跳过样例：'+r.skip.slice(0,10).map(x=>esc(x.name)).join("、")+(r.skip.length>10?" …":"")+'</span>';
+    }
+    msg.innerHTML = s;
+  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+// ========== 转换功能 ==========
+document.getElementById("convertBtn").onclick = async () => {
+  const del = document.getElementById("delChk").checked;
+  const msg = document.getElementById("convMsg");
+  msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
+  try {
+    const r = await api({action:"convert", root:selRoot, delete_source:del});
+    dbg(r);
+    if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
+    let ok=0, skip=0, err=0;
+    (r.results||[]).forEach(x=>{
+      if(x.status==="uploaded") ok++;
+      else if(x.status==="skipped_no_sha256") skip++;
+      else if(x.status==="upload_failed") err++;
+    });
+    msg.innerHTML = '<span class="ok">完成：上传 .cas '+ok+' 个，跳过 '+skip+' 个'+(err?'，上传失败 '+err+' 个':'')+(del?'，已删除原视频':'（原视频保留在云盘）')+'</span><br><span class="muted">.cas 已上传到原视频所在的云盘文件夹，去云盘确认一下是否出现</span>';
+    
+    // 缓存结果到 localStorage，供 restore.html 读取
+    try { writeLocal("casgen_last_results", JSON.stringify(r.results)); } catch(e){}
+  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+</script>
+</body>
+</html>
