@@ -24,6 +24,7 @@ from share139 import (parse_share_input, get_share_info, list_all_share_files,
 import monitor
 import monitor_store
 import rename
+import webdav
 # from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
@@ -142,6 +143,9 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # WebDAV GET 优先
+        if self.path.startswith("/dav/"):
+            return webdav.handle_get(self, schedule_cleanup_fn=self._schedule_cas_cleanup)
         # 静态 HTML 文件服务
         html_paths = ("/", "/index.html", "/convert.html", "/share.html", "/strm.html",
                       "/restore.html", "/rename.html", "/utils.js")
@@ -184,14 +188,67 @@ class H(BaseHTTPRequestHandler):
                 "version": VERSION,
                 "publicUrlConfigured": bool(public_url),
                 "publicUrl": public_url or None,
+                "webdav": webdav.get_info(),
                 "endpoints": {
                     "health": "/api/health",
                     "version": "/api/version",
                     "casGateway": "/cas/<139相对路径>/<xxx.cas>",
+                    "webdav": "/dav/" if webdav.is_enabled() else None,
                 },
             })
         else:
             self._json({"error": "not found", "hint": "试试 /api/health 或 /api/version"}, 404)
+
+    # ---------- WebDAV 方法 ----------
+    def do_OPTIONS(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_options(self)
+        self.send_response(200)
+        self.send_header("Allow", "GET,POST,OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_PROPFIND(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_propfind(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_HEAD(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_head(self)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+
+    def do_PUT(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_put(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_DELETE(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_delete(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_MKCOL(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_mkcol(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_MOVE(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_move(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_LOCK(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_lock(self)
+        self._json({"error": "not found"}, 404)
+
+    def do_UNLOCK(self):
+        if self.path.startswith("/dav/"):
+            return webdav.handle_unlock(self)
+        self._json({"error": "not found"}, 404)
 
     def handle_cas(self, rel_path):
         """CAS→Strm 播放网关：/cas/<139相对路径>/<xxx.cas> -> 读.cas -> 秒传恢复 -> 302 直链。
@@ -582,6 +639,7 @@ def main():
     public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip()
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     monitor.bind(sys.modules[__name__])
+    webdav.bind(lambda: CLIENT, lambda: AUTH_EXPIRED)
     monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
 
     def _restore_auth():
@@ -617,6 +675,12 @@ def main():
     print(f"  本机浏览器打开： http://localhost:{port}")
     print(f"  其他设备打开：   http://<本机IP>:{port}")
     print(f"  健康检查：       http://localhost:{port}/api/health")
+    if webdav.is_enabled():
+        print(f"  WebDAV 已启用：  http://<本机IP>:{port}/dav/")
+        print(f"  WebDAV 用户：    {webdav.WEBDAV_USER}")
+        print(f"  WebDAV 根目录：  {webdav.WEBDAV_ROOT}")
+    else:
+        print("  WebDAV：        未启用（设置 CASGEN_WEBDAV_USER / CASGEN_WEBDAV_PASS 开启）")
     if public_url:
         print(f"  CAS 网关公网：   {public_url}/cas/<路径>")
     else:

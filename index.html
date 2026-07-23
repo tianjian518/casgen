@@ -58,7 +58,7 @@
   <span class="navspacer"></span>
 </nav>
 
-<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.8</span></h1>
+<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.9</span></h1>
 <p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。</p>
 
 <!-- 使用三步 -->
@@ -69,6 +69,21 @@
     <li>展开目录选好目标文件夹 → 用顶部导航去「🔄 转换CAS」或「📥 分享」一键处理</li>
     <li>用 <a href="https://github.com/OpenListTeam/OpenList/releases" target="_blank" style="color:#2563eb">光鸭版 OpenList</a> / <b>网易爆米花</b> / <b>飞牛影视</b> 挂载云盘，点 <code>.cas</code> 文件直接零流量播放</li>
   </ol>
+</div>
+
+<!-- WebDAV 挂载 -->
+<div class="card" id="webdavCard" style="display:none">
+  <h3>📡 WebDAV 挂载（播放器直挂 .strm）</h3>
+  <p class="muted" style="margin:4px 0">把 139 云盘里的 <code>.strm</code> 文件通过 WebDAV 挂到网易爆米花、飞牛影视等播放器，播放时自动跳转 139 直链。</p>
+  <table style="font-size:13px; margin-top:8px;">
+    <tr><td style="width:100px; font-weight:600;">挂载地址</td><td><code id="webdavUrl">-</code></td></tr>
+    <tr><td style="font-weight:600;">用户名</td><td><code id="webdavUser">-</code></td></tr>
+    <tr><td style="font-weight:600;">密码</td><td><code id="webdavPass">-</code></td></tr>
+    <tr><td style="font-weight:600;">WebDAV 根目录</td><td><code id="webdavRoot">-</code></td></tr>
+  </table>
+  <p class="muted" style="margin-top:8px; font-size:12px;">
+    ⚠️ 需要在启动 casgen 时设置环境变量 <code>CASGEN_WEBDAV_USER</code> 和 <code>CASGEN_WEBDAV_PASS</code> 才会启用。
+  </p>
 </div>
 
 <!-- 登录 -->
@@ -207,13 +222,22 @@ async function checkAuth(){
 setInterval(checkAuth, 60000);
 checkAuth();
 
-// ========== 自动回填上次 token + 版本号 ==========
+// ========== 自动回填上次 token + 版本号 + WebDAV 信息 ==========
 window.addEventListener("load", ()=>{
   // 自动填充版本号（不等登录，直接从 /api/version 取）
   fetch("/api/version").then(r=>r.json()).then(v=>{
     if(v && v.ok && v.version){
       const el = document.getElementById("ver");
       if(el) el.textContent = "v"+v.version;
+    }
+    // WebDAV 信息
+    if(v && v.ok && v.webdav && v.webdav.enabled){
+      const card = document.getElementById("webdavCard");
+      if(card) card.style.display = "block";
+      document.getElementById("webdavUrl").textContent = window.location.origin + "/dav/";
+      document.getElementById("webdavUser").textContent = v.webdav.user || "";
+      document.getElementById("webdavPass").textContent = "***（环境变量 CASGEN_WEBDAV_PASS）";
+      document.getElementById("webdavRoot").textContent = v.webdav.root || "root";
     }
   }).catch(()=>{});
   const saved = readLocal("casgen_auth");

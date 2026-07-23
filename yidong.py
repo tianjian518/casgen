@@ -31,8 +31,8 @@ VIDEO_EXT = {
 }
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
-# 4.8.0：strm_create action 修复 + _is_folder 数字类型修复 + doAutoReLogin 递归修复 + 子页面版本号/authBanner 统一 + 路径穿越防御 + _restore_auth token过期不挂CLIENT + share phone传递 + monitor_add interval 统一
-__version__ = "4.8.0"
+# 4.9.0：新增 WebDAV 服务（/dav/），播放器可直接挂载 .strm 文件
+__version__ = "4.9.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -418,28 +418,28 @@ class Yun139:
         }
         return base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
 
-    # ---------- 上传 cas 小文件（已对齐光鸭版 OpenList 139 驱动：file/create → PUT → /file/complete） ----------
-    def upload_cas(self, cas_name, content, parent):
-        """把 .cas 种子文件真实上传到 139 云盘（三步，缺一不可）：
-           1) POST /file/create 预上传，拿到 fileId / uploadId / partInfos[].uploadUrl
-           2) PUT 内容到 uploadUrl
-           3) POST /file/complete 提交完成 —— 139 必须走完这步文件才会真正显示在云盘
+    # ---------- 通用文件上传（三步：file/create → PUT → /file/complete） ----------
+    def upload_file(self, name, content, parent, content_type="application/octet-stream"):
+        """通用二进制/文本文件上传到 139 云盘。
+
+        content 可以是 str 或 bytes；content_type 默认 application/octet-stream。
+        返回 dict，成功时含 _file_id，失败时含 _upload_error / _complete_error 等。
         """
-        raw = content.encode("utf-8")
-        size = len(raw)
-        content_sha256 = hashlib.sha256(raw).hexdigest()
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        size = len(content)
+        content_sha256 = hashlib.sha256(content).hexdigest()
         body = {
             "contentHash": content_sha256,
             "contentHashAlgorithm": "SHA256",
-            "contentType": "application/octet-stream",
+            "contentType": content_type,
             "parallelUpload": False,
-            "partInfos": [{"partNumber": 1, "partSize": size, "parallelHashCtx": {"partOffset": 0}}],
+            "partInfos": [{"partNumber": 1, "partSize": size}],
             "size": size,
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
-            "name": cas_name,
+            "name": name,
             "type": "file",
-            # 注意：139 真机 /file/create 拒收 fileRenameMode 字段（任意取值均 04000002），
-            # 故不发送该字段；"已存在同名 .cas 跳过"改由 generate() 前置检查实现。
+            # 139 真机 /file/create 拒收 fileRenameMode 字段（任意取值均 04000002），不发送。
         }
         resp = self.personal_post("/file/create", body)
         if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
@@ -454,34 +454,30 @@ class Yun139:
         upload_id = d.get("uploadId") or resp.get("uploadId")
         exist = d.get("exist") or d.get("rapidUpload")
         if exist and file_id:
-            # 秒传命中（cas 是全新文件一般不会命中，保留兼容）
             resp["_file_id"] = file_id
             resp["_exist"] = True
             return resp
-        # 真实上传：取分片上传地址
         part_infos = d.get("partInfos") or []
         upload_url = None
         for p in part_infos:
-            upload_url = p.get("uploadUrl") or p.get("uploadUrl")
+            upload_url = p.get("uploadUrl") or p.get("uploadurl")
             if upload_url:
                 break
         if not upload_url:
             resp["_missing_upload_url"] = True
             return resp
-        # 2) PUT 内容到上传地址
         try:
-            req = urllib.request.Request(upload_url, data=raw, headers={
-                "Content-Type": "application/octet-stream",
+            req = urllib.request.Request(upload_url, data=content, headers={
+                "Content-Type": content_type,
                 "Content-Length": str(size),
                 "Origin": "https://yun.139.com",
                 "Referer": "https://yun.139.com/",
             }, method="PUT")
-            urllib.request.urlopen(req, timeout=60).read()
+            urllib.request.urlopen(req, timeout=120).read()
         except Exception as e:
             resp["_upload_error"] = str(e)
             resp["_file_id"] = file_id
             return resp
-        # 3) 完成上传 commit —— 139 必须这一步，文件才会真正显示
         if file_id and upload_id:
             try:
                 comp = self.personal_post("/file/complete", {
@@ -493,7 +489,6 @@ class Yun139:
                 resp["_complete"] = comp
             except Exception as e:
                 resp["_complete_error"] = str(e)
-        # 回查确认文件真的出现（二次保险）
         if file_id:
             try:
                 resp["_verify_found"] = self._verify_file(parent, file_id)
@@ -502,6 +497,14 @@ class Yun139:
         resp["_file_id"] = file_id
         resp["_upload_id"] = upload_id
         return resp
+
+    def upload_cas(self, cas_name, content, parent):
+        """上传 .cas 种子文件（委托 upload_file）。"""
+        return self.upload_file(cas_name, content, parent, "application/octet-stream")
+
+    def upload_text_file(self, name, text, parent):
+        """上传纯文本文件（委托 upload_file）。"""
+        return self.upload_file(name, text, parent, "text/plain")
 
     # ---------- 恢复（按 sha256 秒传，未实测） ----------
     def restore(self, sha256, size, name, parent):
@@ -744,6 +747,49 @@ class Yun139:
             cur = self._find_folder_readonly(part, cur)
         return self._find_file_readonly(parts[-1], cur)
 
+    def resolve_path(self, path, root="root"):
+        """把 139 相对路径解析为 (fileId, is_folder, item)。
+
+        与 resolve_path_readonly 的区别：
+        1. 支持路径指向目录（末尾部分可以是文件夹名或文件名）
+        2. 返回 item 原始数据，供 PROPFIND 提取元数据
+        3. 可通过 root 参数指定解析起点（WebDAV 子树挂载用）
+
+        返回: (fileId: str, is_folder: bool, item: dict | None)
+        异常: FileNotFoundError 路径不存在
+        """
+        path = (path or "").strip().strip("/")
+        cur = root if root not in ("/", "", "root") else "root"
+
+        if not path:
+            return cur, True, None
+
+        parts = [p for p in path.split("/") if p]
+        for i, part in enumerate(parts):
+            is_last = (i == len(parts) - 1)
+            items, _, _ = self.list_dir(cur)
+
+            if is_last:
+                # 末尾：先匹配文件夹，再匹配文件
+                for it in items:
+                    if self._is_folder(it) and self._name(it) == part:
+                        return self._fid(it), True, it
+                for it in items:
+                    if not self._is_folder(it) and self._name(it) == part:
+                        return self._fid(it), False, it
+                raise FileNotFoundError("路径不存在: %s" % path)
+            else:
+                found = False
+                for it in items:
+                    if self._is_folder(it) and self._name(it) == part:
+                        cur = self._fid(it)
+                        found = True
+                        break
+                if not found:
+                    raise FileNotFoundError("文件夹不存在: %s" % part)
+
+        return cur, True, None
+
     def _find_folder_readonly(self, name, parent):
         items, _, _ = self.list_dir(parent)
         for it in items:
@@ -779,81 +825,6 @@ class Yun139:
                     yield rel, rec
             if not cursor:
                 break
-
-    def upload_text_file(self, name, text, parent):
-        """三步上传纯文本文件（如 .strm）到 139：file/create -> PUT -> /file/complete。"""
-        raw = text.encode("utf-8")
-        size = len(raw)
-        content_sha256 = hashlib.sha256(raw).hexdigest()
-        body = {
-            "contentHash": content_sha256,
-            "contentHashAlgorithm": "SHA256",
-            "contentType": "text/plain",
-            "parallelUpload": False,
-            "partInfos": [{"partNumber": 1, "partSize": size}],
-            "size": size,
-            "parentFileId": parent if parent not in ("root", "/", "") else "/",
-            "name": name,
-            "type": "file",
-            # 注意：139 真机 /file/create 拒收 fileRenameMode 字段（任意取值均 04000002），
-            # 与 upload_cas 一致移除；重复文件由下方 exist/rapidUpload 分支处理。
-        }
-        resp = self.personal_post("/file/create", body)
-        if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
-            resp["_create_failed"] = True
-            return resp
-        d = resp.get("data") if isinstance(resp, dict) else None
-        if not isinstance(d, dict):
-            resp["_create_failed"] = True
-            resp["_no_data"] = True
-            return resp
-        file_id = d.get("fileId") or resp.get("fileId")
-        upload_id = d.get("uploadId") or resp.get("uploadId")
-        exist = d.get("exist") or d.get("rapidUpload")
-        if exist and file_id:
-            resp["_file_id"] = file_id
-            resp["_exist"] = True
-            return resp
-        part_infos = d.get("partInfos") or []
-        upload_url = None
-        for p in part_infos:
-            upload_url = p.get("uploadUrl") or p.get("uploadUrl")
-            if upload_url:
-                break
-        if not upload_url:
-            resp["_missing_upload_url"] = True
-            return resp
-        try:
-            req = urllib.request.Request(upload_url, data=raw, headers={
-                "Content-Type": "text/plain",
-                "Content-Length": str(size),
-                "Origin": "https://yun.139.com",
-                "Referer": "https://yun.139.com/",
-            }, method="PUT")
-            urllib.request.urlopen(req, timeout=60).read()
-        except Exception as e:
-            resp["_upload_error"] = str(e)
-            resp["_file_id"] = file_id
-            return resp
-        if file_id and upload_id:
-            try:
-                comp = self.personal_post("/file/complete", {
-                    "contentHash": content_sha256,
-                    "contentHashAlgorithm": "SHA256",
-                    "fileId": file_id,
-                    "uploadId": upload_id,
-                })
-                resp["_complete"] = comp
-            except Exception as e:
-                resp["_complete_error"] = str(e)
-        if file_id:
-            try:
-                resp["_verify_found"] = self._verify_file(parent, file_id)
-            except Exception:
-                resp["_verify_found"] = "verify_error"
-        resp["_file_id"] = file_id
-        resp["_upload_id"] = upload_id
-        return resp
 
     def generate_strm(self, root, public_url):
         """遍历 root 下所有 .cas，为每个生成同名 .strm（内容指向 casgen 网关 URL），上传到同目录。

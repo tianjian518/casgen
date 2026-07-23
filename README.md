@@ -1,4 +1,4 @@
-# 移动云盘影视 CAS 瘦身工具（v4.8）
+# 移动云盘影视 CAS 瘦身工具（v4.9）
 
 把移动云盘里**已有的**原视频，零流量变成几 KB 的 `.cas` 文件；播放时从 `.cas` 临时恢复出原视频秒传回云盘。
 全部在浏览器里用鼠标操作，**不需要命令行、不需要改代码、不需要联网装任何东西**。
@@ -188,7 +188,15 @@ casgen/
 
 ## 十一、版本说明
 
-- **v4.8.0（当前）**：全面调试修复 ——
+- **v4.9.0（当前）**：新增 WebDAV 服务 ——
+  - 同端口 `/dav/` 前缀提供 WebDAV 协议，播放器可直接挂载 139 云盘里的 `.strm` 文件。
+  - 支持 WebDAV 方法：OPTIONS / PROPFIND / GET / HEAD / PUT / DELETE / MKCOL / MOVE / LOCK / UNLOCK。
+  - Basic Auth 认证，独立用户名/密码通过 `CASGEN_WEBDAV_USER` / `CASGEN_WEBDAV_PASS` 配置；未配置时 WebDAV 禁用并返回 503。
+  - 可选 `CASGEN_WEBDAV_ROOT` 限定暴露的子树（默认 `root` 即整个云盘）。
+  - `.strm` 文件 GET 时自动解析内容：若指向自身 `/cas/` 网关，则通过 `cas_get_play_link` 秒传恢复并 302 重定向到 139 直链；外部 URL 直接 302。
+  - 新增 `webdav.py` 纯标准库模块；`yidong.py` 新增 `resolve_path()`（支持目录/文件两种末尾节点）和 `upload_file()`（通用二进制上传）。
+  - 首页增加 WebDAV 挂载说明卡片，自动显示挂载地址/用户名/根目录。
+- **v4.8.0**：全面调试修复 ——
   - **关键 Bug**：`strm.html` 前端发送 `action:"strm_create"` 但后端只认 `"generate_strm"`（Strm 页面按钮永远报"未知操作"）→ 统一双向兼容；前端 status 字段 `"created"`/`"skipped_no_cas"` 与后端 `"uploaded"`/`"skipped_existing"` 不匹配 → 统一。
   - **文件夹判断**：`yidong._is_folder()` 对数字类型 `fileType` 调 `.lower()` 抛 `AttributeError` → 健壮化（str+int+isFolder 三路兼容）；`app._fmt()` 把数字 1 和 2 都当文件夹（2=文件被误判）→ 修正为仅 1=文件夹。
   - **自动重登递归**：`api()` 检测 `needLogin` → 调 `doAutoReLogin()` → 内部调 `api(login)` → 若 login 也 `needLogin` 则无限递归 → `doAutoReLogin` 改用裸 `fetch` 发 login 请求。

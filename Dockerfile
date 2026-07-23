@@ -10,7 +10,7 @@ WORKDIR /app
 # 否则容器启动即报 ModuleNotFoundError（飞牛/抱脸都一样）。
 COPY --chown=casgen:casgen app.py yidong.py index.html utils.js README.md \
      convert.html share.html strm.html restore.html rename.html \
-     rename.py monitor.py monitor_store.py share139.py healthcheck.py ./
+     rename.py monitor.py monitor_store.py share139.py healthcheck.py webdav.py ./
 
 # 监听端口由 PORT 环境变量决定：Hugging Face Spaces 注入 7860，本地/飞牛默认 5000。
 ENV PORT=5000
