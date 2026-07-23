@@ -23,11 +23,30 @@
   th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
   a.back { color:#2563eb; text-decoration:none; font-size:14px; display:inline-block; margin-bottom:12px; }
   a.back:hover { text-decoration:underline; }
+  /* 顶部导航栏 */
+  .topnav { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid #e5e7eb; margin:-16px -16px 14px; padding:10px 16px; display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+  .topnav .brand { font-weight:700; font-size:15px; margin-right:8px; white-space:nowrap; }
+  .topnav a { text-decoration:none; color:#374151; padding:6px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
+  .topnav a:hover { background:#eef2ff; }
+  .topnav a.active { background:#2563eb; color:#fff; }
+  .topnav .navspacer { margin-left:auto; }
+  .navfolder { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:8px 12px; margin:0 0 12px; font-size:13px; }
+  .navfolder b { color:#15803d; }
 </style>
 </head>
 <body>
-<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<nav class="topnav">
+  <span class="brand">🎬 CAS工具</span>
+  <a href="index.html">🏠 首页</a>
+  <a href="convert.html">🔄 转换CAS</a>
+  <a href="restore.html" class="active">▶️ 恢复</a>
+  <a href="share.html">📥 分享</a>
+  <a href="strm.html">🎞️ Strm</a>
+  <a href="rename.html">✏️ 重命名</a>
+  <span class="navspacer"></span>
+</nav>
 <h1>▶️ 从 .cas 恢复播放 <span id="ver" class="muted"></span></h1>
+<div class="navfolder">当前文件夹：<b id="navFolder">未选择</b> · <a href="index.html">去首页选择</a></div>
 <p class="muted">在「<a href="index.html" style="color:#2563eb">首页</a>」转换出 .cas 后，如果需要临时恢复原视频回云盘观看，点"恢复"即可。</p>
 
 <!-- 恢复播放 -->
@@ -55,6 +74,7 @@
 const selRoot = readLocal("casgen_selected_root") || "root";
 const selName = readLocal("casgen_selected_name") || "根目录";
 document.getElementById("currentFolder").textContent = selName + " (" + selRoot + ")";
+document.getElementById("navFolder").textContent = selName + "（" + selRoot + "）";
 
 let lastResults = []; // 缓存转换结果
 

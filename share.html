@@ -28,10 +28,26 @@
   a.back:hover { text-decoration:underline; }
   .pick { background:#f8fafc; border:1px dashed #cbd5e1; border-radius:8px; padding:12px; margin-top:10px; }
   .hl { background:#ecfdf5; border:1px solid #6ee7b7; }
+  /* 顶部导航栏 */
+  .topnav { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid #e5e7eb; margin:-16px -16px 14px; padding:10px 16px; display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+  .topnav .brand { font-weight:700; font-size:15px; margin-right:8px; white-space:nowrap; }
+  .topnav a { text-decoration:none; color:#374151; padding:6px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
+  .topnav a:hover { background:#eef2ff; }
+  .topnav a.active { background:#2563eb; color:#fff; }
+  .topnav .navspacer { margin-left:auto; }
 </style>
 </head>
 <body>
-<a href="index.html" class="back">← 返回首页（登录/选文件夹）</a>
+<nav class="topnav">
+  <span class="brand">🎬 CAS工具</span>
+  <a href="index.html">🏠 首页</a>
+  <a href="convert.html">🔄 转换CAS</a>
+  <a href="restore.html">▶️ 恢复</a>
+  <a href="share.html" class="active">📥 分享</a>
+  <a href="strm.html">🎞️ Strm</a>
+  <a href="rename.html">✏️ 重命名</a>
+  <span class="navspacer"></span>
+</nav>
 <h1>📥 分享链接一条龙 <span id="ver" class="muted"></span></h1>
 <p class="muted">解析分享链接 → 转存视频到云盘 →（可选）生成 CAS →（可选）加入监控，后续新剧集自动转 CAS 并删原视频。</p>
 

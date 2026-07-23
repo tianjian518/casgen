@@ -25,19 +25,32 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
 
-  /* 导航卡片 */
-  .nav-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:12px; margin:16px 0; }
-  .nav-card { background:#fff; border:2px solid #e5e7eb; border-radius:10px; padding:16px; text-align:center; cursor:pointer; transition:border-color .2s; text-decoration:none; color:inherit; display:block; }
-  .nav-card:hover { border-color:#2563eb; }
-  .nav-card .icon { font-size:32px; margin-bottom:8px; }
-  .nav-card .title { font-weight:700; font-size:15px; }
-  .nav-card .desc { font-size:12px; color:#6b7280; margin-top:4px; }
+  /* 顶部导航栏（常驻，所有页面共用） */
+  .topnav { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid #e5e7eb; margin:-16px -16px 14px; padding:10px 16px; display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+  .topnav .brand { font-weight:700; font-size:15px; margin-right:8px; white-space:nowrap; }
+  .topnav a { text-decoration:none; color:#374151; padding:6px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
+  .topnav a:hover { background:#eef2ff; }
+  .topnav a.active { background:#2563eb; color:#fff; }
+  .topnav .navspacer { margin-left:auto; }
+  .navfolder { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:8px 12px; margin:0 0 12px; font-size:13px; }
+  .navfolder b { color:#15803d; }
   .selected-info { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:13px; }
 </style>
 </head>
 <body>
-<h1>🎬 网盘影视 CAS 工具 <span id="ver" class="muted">v2026-07-22b</span></h1>
-<p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。</p>
+<nav class="topnav">
+  <span class="brand">🎬 CAS工具</span>
+  <a href="index.html" class="active">🏠 首页</a>
+  <a href="convert.html">🔄 转换CAS</a>
+  <a href="restore.html">▶️ 恢复</a>
+  <a href="share.html">📥 分享</a>
+  <a href="strm.html">🎞️ Strm</a>
+  <a href="rename.html">✏️ 重命名</a>
+  <span class="navspacer"></span>
+</nav>
+
+<h1>🎬 网盘影视 CAS 工具 <span id="ver" class="muted">v4.0</span></h1>
+<p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。先登录、选好文件夹，再用上方导航进入各功能。</p>
 
 <!-- 登录 -->
 <div class="card">
@@ -66,38 +79,6 @@
 <!-- 已选文件夹提示 -->
 <div id="selectedInfo" class="selected-info" style="display:none">
   ✅ 已选定：<b id="selInfoText"></b>
-</div>
-
-<!-- 功能导航 -->
-<div id="navSection" style="display:none">
-  <h3>🚀 功能入口</h3>
-  <div class="nav-grid">
-    <a href="convert.html" class="nav-card">
-      <div class="icon">🔄</div>
-      <div class="title">分析 + 转换 CAS</div>
-      <div class="desc">分析可转换文件、生成 .cas 瘦身</div>
-    </a>
-    <a href="restore.html" class="nav-card">
-      <div class="icon">▶️</div>
-      <div class="title">恢复播放</div>
-      <div class="desc">从 .cas 临时恢复原视频到云盘</div>
-    </a>
-    <a href="share.html" class="nav-card">
-      <div class="icon">📥</div>
-      <div class="title">分享链接一条龙</div>
-      <div class="desc">解析 → 转存 → 生成 CAS → 删除原视频</div>
-    </a>
-    <a href="strm.html" class="nav-card">
-      <div class="icon">📝</div>
-      <div class="title">Strm 批量生成</div>
-      <div class="desc">为 .cas 生成 .strm 播放直链</div>
-    </a>
-    <a href="rename.html" class="nav-card">
-      <div class="icon">✏️</div>
-      <div class="title">L1 重命名</div>
-      <div class="desc">本地正则重命名 .cas 文件名</div>
-    </a>
-  </div>
 </div>
 
 <!-- 调试区 -->
@@ -236,8 +217,6 @@ window.addEventListener("load", ()=>{
     state.selectedName = selName;
     document.getElementById("selInfoText").textContent = selName + "（" + selRoot + "）";
     document.getElementById("selectedInfo").style.display = "block";
-    // 如果之前选过文件夹，也显示导航区域
-    document.getElementById("navSection").style.display = "block";
   }
 });
 </script>
