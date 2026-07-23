@@ -87,40 +87,47 @@ window.addEventListener("load", ()=>{ try{ api({action:"login_status"}).then(d=>
 
 // ========== 分析功能 ==========
 document.getElementById("planBtn").onclick = async () => {
-  const msg = document.getElementById("planMsg");
-  msg.innerHTML = "分析中（可能要遍历很多文件，请稍候）…";
-  try {
-    const r = await api({action:"plan", root:selRoot});
-    dbg(r);
-    if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
-    let s = '可生成 .cas ：<b>'+r.can_count+'</b> 个；跳过（云端无 SHA256）：<b>'+r.skip_count+'</b> 个。<br>';
-    if (r.skip && r.skip.length){
-      s += '<span class="muted">跳过样例：'+r.skip.slice(0,10).map(x=>esc(x.name)).join("、")+(r.skip.length>10?" …":"")+'</span>';
-    }
-    msg.innerHTML = s;
-  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+  await withLoading(document.getElementById("planBtn"), async ()=>{
+    const msg = document.getElementById("planMsg");
+    msg.innerHTML = "分析中（可能要遍历很多文件，请稍候）…";
+    try {
+      const r = await api({action:"plan", root:selRoot});
+      dbg(r);
+      if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; showToast("分析失败："+r.error,"error"); return; }
+      let s = '可生成 .cas ：<b>'+r.can_count+'</b> 个；跳过（云端无 SHA256）：<b>'+r.skip_count+'</b> 个。<br>';
+      if (r.skip && r.skip.length){
+        s += '<span class="muted">跳过样例：'+r.skip.slice(0,10).map(x=>esc(x.name)).join("、")+(r.skip.length>10?" …":"")+'</span>';
+      }
+      msg.innerHTML = s;
+      showToast("分析完成：可生成 "+r.can_count+" 个","success");
+    } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "分析中…");
 };
 
 // ========== 转换功能 ==========
 document.getElementById("convertBtn").onclick = async () => {
   const del = document.getElementById("delChk").checked;
-  const msg = document.getElementById("convMsg");
-  msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
-  try {
-    const r = await api({action:"convert", root:selRoot, delete_source:del});
-    dbg(r);
-    if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
-    let ok=0, skip=0, err=0;
-    (r.results||[]).forEach(x=>{
-      if(x.status==="uploaded") ok++;
-      else if(x.status==="skipped_no_sha256") skip++;
-      else if(x.status==="upload_failed") err++;
-    });
-    msg.innerHTML = '<span class="ok">完成：上传 .cas '+ok+' 个，跳过 '+skip+' 个'+(err?'，上传失败 '+err+' 个':'')+(del?'，已删除原视频':'（原视频保留在云盘）')+'</span><br><span class="muted">.cas 已上传到原视频所在的云盘文件夹，去云盘确认一下是否出现</span>';
-    
-    // 缓存结果到 localStorage，供 restore.html 读取
-    try { writeLocal("casgen_last_results", JSON.stringify(r.results)); } catch(e){}
-  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+  if (del && !confirm("已勾选「生成后删除原视频」，将立即从云盘删除原视频且不可撤销（.cas 可随时秒传恢复）。确定继续？")) return;
+  await withLoading(document.getElementById("convertBtn"), async ()=>{
+    const msg = document.getElementById("convMsg");
+    msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
+    try {
+      const r = await api({action:"convert", root:selRoot, delete_source:del});
+      dbg(r);
+      if (!r.ok){ msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; showToast("转换失败："+r.error,"error"); return; }
+      let ok=0, skip=0, err=0;
+      (r.results||[]).forEach(x=>{
+        if(x.status==="uploaded") ok++;
+        else if(x.status==="skipped_no_sha256") skip++;
+        else if(x.status==="upload_failed") err++;
+      });
+      msg.innerHTML = '<span class="ok">完成：上传 .cas '+ok+' 个，跳过 '+skip+' 个'+(err?'，上传失败 '+err+' 个':'')+(del?'，已删除原视频':'（原视频保留在云盘）')+'</span><br><span class="muted">.cas 已上传到原视频所在的云盘文件夹，去云盘确认一下是否出现</span>';
+      if(err>0) showToast("完成，但 "+err+" 个失败（可能云盘配额不足）","warn",5000);
+      else showToast("转换完成 ✔ "+ok+" 个 .cas","success");
+      // 缓存结果到 localStorage，供 restore.html 读取
+      try { writeLocal("casgen_last_results", JSON.stringify(r.results)); } catch(e){}
+    } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "转换中…");
 };
 </script>
 </body>

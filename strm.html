@@ -80,27 +80,31 @@ window.addEventListener("load", ()=>{
 });
 
 document.getElementById("genBtn").onclick = async () => {
-  const recursive = document.getElementById("recursiveChk").checked;
-  const msg = document.getElementById("convMsg");
-  msg.textContent = "生成中…";
-  try {
-    const r = await api({ action: "strm_create", root: selRoot, recursive });
-    dbg(r);
-    if (!r.ok) { msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; return; }
-    let ok=0, sk=0, err=0;
-    (r.results||[]).forEach(x => {
-      if (x.status==="created") ok++;
-      else if (x.status==="skipped_no_cas") sk++;
-      else err++;
-    });
-    msg.innerHTML = '<span class="ok">完成 ✔ 创建 '+ok+' 个，跳过 '+sk+' 个，失败 '+err+' 个</span><br><span class="muted">已上传到原视频所在的云盘文件夹</span>';
-    const tb=document.querySelector("#strmTable tbody"); tb.innerHTML="";
-    (r.results||[]).forEach(x=>{
-      const tr=document.createElement("tr");
-      tr.innerHTML="<td>"+esc(x.name)+"</td><td class='ok'>✔"+esc(x.status)+"</td>";
-      tb.appendChild(tr);
-    });
-  } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+  await withLoading(document.getElementById("genBtn"), async ()=>{
+    const recursive = document.getElementById("recursiveChk").checked;
+    const msg = document.getElementById("convMsg");
+    msg.textContent = "生成中…";
+    try {
+      const r = await api({ action: "strm_create", root: selRoot, recursive });
+      dbg(r);
+      if (!r.ok) { msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; showToast("生成失败："+r.error,"error",5000); return; }
+      let ok=0, sk=0, err=0;
+      (r.results||[]).forEach(x => {
+        if (x.status==="created") ok++;
+        else if (x.status==="skipped_existing") { sk++; ok++; }  // 已有算成功
+        else if (x.status==="skipped_no_cas") sk++;
+        else err++;
+      });
+      msg.innerHTML = '<span class="ok">完成 ✔ 创建 '+ok+' 个（含已存在 '+sk+' 个），失败 '+err+' 个</span><br><span class="muted">已上传到原视频所在的云盘文件夹。.strm 内容指向网关：'+esc(r.publicUrl||"")+'/cas/&lt;路径&gt;</span>';
+      const tb=document.querySelector("#strmTable tbody"); tb.innerHTML="";
+      (r.results||[]).forEach(x=>{
+        const tr=document.createElement("tr");
+        tr.innerHTML="<td>"+esc(x.name)+"</td><td>"+esc(x.status)+"</td>";
+        tb.appendChild(tr);
+      });
+      showToast(err>0?("生成完成，但 "+err+" 个失败"):("生成完成 ✔ "+ok+" 个"), err>0?"warn":"success");
+    } catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "生成中…");
 };
 </script>
 </body>

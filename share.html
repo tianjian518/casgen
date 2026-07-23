@@ -117,7 +117,7 @@ mountFolderPicker("share", "targetFolder");
 
 // ========== 登录态失效检测 ==========
 async function checkAuth(){
-  try{ const d = await api({action:"login_status"}); if(d && d.expired){ alert("登录已失效，请返回首页重新登录"); } }catch(e){}
+  try{ const d = await api({action:"login_status"}); if(d && d.expired){ showToast("登录已失效，请返回首页重新登录","warn",6000); } }catch(e){}
 }
 setInterval(checkAuth, 60000);
 
@@ -132,64 +132,72 @@ let parsed = null;  // { linkID, needPwd, linkName, files, count }
 
 // ========== ① 解析 ==========
 document.getElementById("parseBtn").onclick = async () => {
+  const btn = document.getElementById("parseBtn");
   const txt = document.getElementById("shareText").value.trim();
-  if(!txt){ alert("请粘贴至少一个分享链接"); return; }
+  if(!txt){ showToast("请粘贴至少一个分享链接","warn"); return; }
   const msg = document.getElementById("parseMsg");
   const saveBtn = document.getElementById("saveBtn");
-  msg.innerHTML = "解析中…"; saveBtn.disabled = true; parsed = null;
-  try {
-    const d = await api({action:"share_parse", text: txt});
-    dbg(d);
-    if(!d.ok){ msg.innerHTML = '<span class="err">'+esc(d.error||"解析失败")+'</span>'; return; }
-    parsed = d;
-    msg.innerHTML = '<span class="ok">解析成功：'+esc(d.linkName||"")+'，共 '+d.count+' 个视频'+(d.expireTime?'，有效期至 '+esc(d.expireTime):'')+'</span>';
-    const tb = document.querySelector("#parseTable tbody"); tb.innerHTML = "";
-    (d.files||[]).forEach(f=>{
-      const tr = document.createElement("tr");
-      tr.innerHTML = '<td>'+esc(f.name||"")+'</td><td>'+esc(String(f.size||""))+'</td>';
-      tb.appendChild(tr);
-    });
-    saveBtn.disabled = (d.count === 0);
-  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+  await withLoading(btn, async ()=>{
+    msg.innerHTML = "解析中…"; saveBtn.disabled = true; parsed = null;
+    try {
+      const d = await api({action:"share_parse", text: txt});
+      dbg(d);
+      if(!d.ok){ msg.innerHTML = '<span class="err">'+esc(d.error||"解析失败")+'</span>'; showToast("解析失败："+(d.error||""),"error"); return; }
+      parsed = d;
+      msg.innerHTML = '<span class="ok">解析成功：'+esc(d.linkName||"")+'，共 '+d.count+' 个视频'+(d.expireTime?'，有效期至 '+esc(d.expireTime):'')+'</span>';
+      showToast("解析成功 ✔ 共 "+d.count+" 个视频","success");
+      const tb = document.querySelector("#parseTable tbody"); tb.innerHTML = "";
+      (d.files||[]).forEach(f=>{
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td>'+esc(f.name||"")+'</td><td>'+esc(String(f.size||""))+'</td>';
+        tb.appendChild(tr);
+      });
+      saveBtn.disabled = (d.count === 0);
+    } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "解析中…");
 };
 
 // ========== ② 转存 + 生成 CAS（+可选加入监控） ==========
 document.getElementById("saveBtn").onclick = async () => {
-  if(!parsed){ alert("请先点「① 解析链接」"); return; }
+  if(!parsed){ showToast("请先点「① 解析链接」","warn"); return; }
+  const btn = document.getElementById("saveBtn");
   const txt = document.getElementById("shareText").value.trim();
   const target = document.getElementById("targetFolder").value.trim() || "root";
   const autoCas = document.getElementById("autoCasChk").checked;
   const del = document.getElementById("delChk").checked && autoCas;
   const monitor = document.getElementById("monitorChk").checked;
   const msg = document.getElementById("saveMsg");
-  msg.innerHTML = "转存中…";
-  try {
-    const d = await api({action:"share_save", text: txt, target: target,
-                          auto_cas: autoCas, delete_source: del, add_to_monitor: monitor});
-    dbg(d);
-    if(!d.ok){ msg.innerHTML = '<span class="err">'+(d.error||"转存失败")+'</span>'; return; }
-    let s = '<span class="ok">转存完成：共 '+d.saved+' 项（整文件夹，含子目录与所有文件类型）</span>';
-    if(d.videoCount!=null) s += '，分享内视频 '+d.videoCount+' 个';
-    if(d.autoCas){
-      const cr = (d.casResults||[]);
-      const c = cr.filter(x=>x && x.status==="uploaded").length;
-      const fail = cr.filter(x=>x && x.status==="upload_failed").length;
-      s += '，生成 .cas '+c+' 个'+(del?'，已删除原视频':'（原视频保留）');
-      if(fail){
-        s += '<br><span class="warn">⚠️ '+fail+' 个 .cas 因云盘配额不足（资源配额不足 00010012）上传失败：'
-           + '请勾选「生成后删除原视频」释放空间，或清理云盘后再试。</span>';
+  await withLoading(btn, async ()=>{
+    msg.innerHTML = "转存中…";
+    try {
+      const d = await api({action:"share_save", text: txt, target: target,
+                            auto_cas: autoCas, delete_source: del, add_to_monitor: monitor});
+      dbg(d);
+      if(!d.ok){ msg.innerHTML = '<span class="err">'+(d.error||"转存失败")+'</span>'; showToast("转存失败："+(d.error||""),"error"); return; }
+      let s = '<span class="ok">转存完成：共 '+d.saved+' 项（整文件夹，含子目录与所有文件类型）</span>';
+      if(d.videoCount!=null) s += '，分享内视频 '+d.videoCount+' 个';
+      if(d.autoCas){
+        const cr = (d.casResults||[]);
+        const c = cr.filter(x=>x && x.status==="uploaded").length;
+        const fail = cr.filter(x=>x && x.status==="upload_failed").length;
+        s += '，生成 .cas '+c+' 个'+(del?'，已删除原视频':'（原视频保留）');
+        if(fail){
+          s += '<br><span class="warn">⚠️ '+fail+' 个 .cas 因云盘配额不足（资源配额不足 00010012）上传失败：'
+             + '请勾选「生成后删除原视频」释放空间，或清理云盘后再试。</span>';
+          showToast(fail+" 个 .cas 因配额失败，建议勾选删除原视频","warn",5000);
+        } else if(c>0){ showToast("转存成功 ✔ 生成 .cas "+c+" 个","success"); }
+      } else { showToast("转存成功 ✔","success"); }
+      if(d.addToMonitor && d.monitor){
+        if(d.monitor.error){
+          s += '<br><span class="warn">⚠️ '+esc(d.monitor.error)+'</span>';
+        } else {
+          s += '<br><span class="ok">🔄 已加入监控（ID '+esc(d.monitor.id)+'）：新剧集将自动转 CAS'+(d.monitor.intervalMin?('，每 '+d.monitor.intervalMin+' 分钟扫描'):'')+'</span>';
+        }
       }
-    }
-    if(d.addToMonitor && d.monitor){
-      if(d.monitor.error){
-        s += '<br><span class="warn">⚠️ '+esc(d.monitor.error)+'</span>';
-      } else {
-        s += '<br><span class="ok">🔄 已加入监控（ID '+esc(d.monitor.id)+'）：新剧集将自动转 CAS'+(d.monitor.intervalMin?('，每 '+d.monitor.intervalMin+' 分钟扫描'):'')+'</span>';
-      }
-    }
-    msg.innerHTML = s;
-    if(d.addToMonitor) loadMonitors();
-  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+      msg.innerHTML = s;
+      if(d.addToMonitor) loadMonitors();
+    } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "转存中…");
 };
 
 // ========== 监控列表 ==========

@@ -10,8 +10,10 @@ import base64
 import json
 import os
 import re
+import signal
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,6 +35,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(ROOT, "index.html")
 DEBUG_LOG = os.path.join(ROOT, "casgen_debug.log")
 AUTH_FILE = os.path.join(ROOT, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
+_START_TS = time.time()  # 进程启动时间，供 /api/health 计算 uptime
 
 
 def _log_debug(tag, obj):
@@ -94,14 +97,47 @@ def _load_auth():
 
 
 class H(BaseHTTPRequestHandler):
+    def handle(self):
+        """记录请求开始时间，供 log_request 计算耗时。"""
+        self._t0 = time.monotonic()
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            # 客户端提前断开（播放器跳播/用户关闭页面），属于正常现象，静默忽略
+            pass
+
     def log_message(self, *a):
+        # 屏蔽 BaseHTTPRequestHandler 默认 stderr 日志（格式对运维不友好），改用 log_request
         pass
+
+    def log_request(self, code="-", size="-"):
+        try:
+            dur_ms = (time.monotonic() - getattr(self, "_t0", time.monotonic())) * 1000
+        except Exception:
+            dur_ms = 0
+        try:
+            line = "%s - %s %s -> %s (%sB, %.1fms)\n" % (
+                time.strftime("%H:%M:%S"), self.command, self.path, code, size, dur_ms)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    def log_error(self, format, *args):
+        # 错误也走统一格式
+        try:
+            sys.stderr.write("%s - ERROR %s %s: %s\n" % (
+                time.strftime("%H:%M:%S"), self.command, self.path, format % args))
+            sys.stderr.flush()
+        except Exception:
+            pass
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -128,8 +164,30 @@ class H(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 500)
         elif self.path.startswith("/cas/"):
             self.handle_cas(self.path[len("/cas/"):])
+        elif self.path == "/api/health":
+            self._json({
+                "ok": True,
+                "version": VERSION,
+                "loggedIn": CLIENT is not None,
+                "expired": AUTH_EXPIRED,
+                "schedulerRunning": monitor.is_scheduler_running() if hasattr(monitor, "is_scheduler_running") else False,
+                "uptime_s": int(time.time() - _START_TS),
+            })
+        elif self.path == "/api/version":
+            public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip()
+            self._json({
+                "ok": True,
+                "version": VERSION,
+                "publicUrlConfigured": bool(public_url),
+                "publicUrl": public_url or None,
+                "endpoints": {
+                    "health": "/api/health",
+                    "version": "/api/version",
+                    "casGateway": "/cas/<139相对路径>/<xxx.cas>",
+                },
+            })
         else:
-            self._json({"error": "not found"}, 404)
+            self._json({"error": "not found", "hint": "试试 /api/health 或 /api/version"}, 404)
 
     def handle_cas(self, rel_path):
         """CAS→Strm 播放网关：/cas/<139相对路径>/<xxx.cas> -> 读.cas -> 秒传恢复 -> 302 直链。
@@ -511,6 +569,11 @@ def main():
     # 修复：先起服务并立即可用，登录态恢复改到后台线程异步做；调度器先启动但暂不扫描，
     #       等首次登录成功后才开始，避免后台 139 流量与登录抢资源。
     port = int(os.environ.get("PORT", "5000"))
+    # 启动期配置校验：端口合法、报告关键环境变量状态
+    if not (1 <= port <= 65535):
+        print(f"[FATAL] PORT={port} 非法（合法范围 1-65535）", file=sys.stderr)
+        sys.exit(2)
+    public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip()
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     monitor.bind(sys.modules[__name__])
     monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
@@ -542,15 +605,42 @@ def main():
     threading.Thread(target=_restore_auth, daemon=True).start()
 
     print("=" * 50)
-    print("CAS 转换服务已启动")
+    print(f"  CAS 转换服务已启动  v{VERSION}")
     print(f"  本机浏览器打开： http://localhost:{port}")
     print(f"  其他设备打开：   http://<本机IP>:{port}")
+    print(f"  健康检查：       http://localhost:{port}/api/health")
+    if public_url:
+        print(f"  CAS 网关公网：   {public_url}/cas/<路径>")
+    else:
+        print("  ⚠️  CASGEN_PUBLIC_URL 未配置：CAS→Strm 功能将无法生成可用的 .strm")
+        print("     部署时建议设置环境变量：CASGEN_PUBLIC_URL=http://<你的IP>:" + str(port))
     print("按 Ctrl+C 停止")
     print("=" * 50)
+    sys.stdout.flush()
+
+    # 优雅停机：SIGTERM/SIGINT → 停调度器 → 关服务（Docker stop / Ctrl+C 都走这里）
+    _stop_event = threading.Event()
+
+    def _shutdown(signum, frame):
+        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        print(f"\n[{sig_name}] 收到停止信号，正在优雅停机…", flush=True)
+        try:
+            monitor.stop_scheduler()  # 停监控线程（如果暴露了）
+        except Exception:
+            pass
+        # 通知 serve_forever 退出
+        threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    try:
+        signal.signal(signal.SIGINT, _shutdown)
+    except Exception:
+        pass
+
     try:
         srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\n已停止")
+    finally:
+        print("HTTP 服务已停止，再见 👋", flush=True)
 
 
 if __name__ == "__main__":

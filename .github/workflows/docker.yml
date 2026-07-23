@@ -57,3 +57,17 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Smoke test（启动镜像并访问健康检查）
+        run: |
+          IMG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "==> 测试镜像: $IMG"
+          docker rm -f casgen_smoke 2>/dev/null || true
+          docker run -d --name casgen_smoke -p 5050:5000 "$IMG"
+          # 等服务起来（容器 HEALTHCHECK start_period=15s，留余量）
+          sleep 20
+          echo "==> GET /api/health"
+          curl -sf http://localhost:5050/api/health && echo "  ✔ OK"
+          echo "==> GET /api/version"
+          curl -sf http://localhost:5050/api/version && echo "  ✔ OK"
+          docker rm -f casgen_smoke

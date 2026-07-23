@@ -32,7 +32,7 @@ VIDEO_EXT = {
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
-__version__ = "4.6.0"
+__version__ = "4.7.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -177,21 +177,53 @@ class Yun139:
         h["mcloud-sign"] = f"{ts},{rnd},{sign}"
         return h
 
-    def _post_json(self, url, base_headers, body, timeout=20):
+    def _post_json(self, url, base_headers, body, timeout=20, retries=2, backoff=0.6):
         """发送 JSON POST，返回解析后的 dict；非 JSON 时返回 {'_raw': 文本}。
         timeout 默认 20s：139 接口正常 <2s 返回，弱网/容器环境也应在 20s 内响应，
-        避免登录等请求无限挂起（否则前端一直显示"登录中…"）。"""
+        避免登录等请求无限挂起（否则前端一直显示"登录中…"）。
+
+        retries/退避：连接错误、超时、5xx 自动重试（指数退避 0.6s→1.2s→2.4s），
+        避免飞牛 ARM 等弱网环境偶发抖动直接失败。仅对瞬态错误重试，
+        4xx（参数错/认证失败）不重试，避免浪费配额/账号风控。"""
         body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         headers = self._sign_headers(base_headers, body_str)
         data = body_str.encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", "replace")
-        except Exception as e:
-            return {"_error": str(e)}
+        attempt, wait = 0, backoff
+        last_error = None
+        while True:
+            attempt += 1
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                return self._parse_response(raw)
+            except urllib.error.HTTPError as e:
+                # 5xx 服务端错误 → 重试；4xx 客户端错误 → 不重试（参数/认证问题重试也没用）
+                code = e.code
+                try:
+                    raw = e.read().decode("utf-8", "replace")
+                except Exception:
+                    raw = ""
+                if 500 <= code <= 599 and attempt <= retries:
+                    last_error = (code, raw[:200])
+                    time.sleep(wait); wait *= 2; continue
+                # 非 5xx 或已用尽重试：尝试解析为业务 JSON 返回
+                parsed = self._parse_response(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+                return {"_error": "HTTP %d" % code, "_raw": raw[:2000]}
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                # 网络瞬态错误：超时、连接重置、DNS 等 → 重试
+                last_error = str(e)
+                if attempt > retries:
+                    return {"_error": "网络错误（已重试 %d 次）: %s" % (retries, last_error)}
+                time.sleep(wait); wait *= 2; continue
+            except Exception as e:
+                # 其他未知异常 → 不重试
+                return {"_error": str(e)}
+
+    @staticmethod
+    def _parse_response(raw):
         try:
             return json.loads(raw)
         except Exception:

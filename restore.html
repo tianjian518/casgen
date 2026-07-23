@@ -114,16 +114,20 @@ function renderRecords(results){
     const b = document.createElement("button");
     b.textContent = "恢复";
     b.onclick = async () => {
-      b.disabled = true; b.textContent = "恢复中…";
-      const r = await api({action:"restore", sha256:x.sha256, size:x.size, name:x.name.replace(/\.cas$/,""), parent:x.parent});
-      dbg(r);
-      if(r.ok){
-        b.textContent = "已恢复 ✔";
-        tr.querySelector("td:nth-child(3)").innerHTML = '<span class="ok">✔ 已恢复</span>';
-      } else {
-        b.textContent = "失败";
-        tr.querySelector("td:nth-child(3)").innerHTML = '<span class="err">✘ '+esc(r.error)+'</span>';
-      }
+      if(!confirm("确认从云盘秒传恢复「"+esc(x.name)+"」？将占用云盘空间（约"+fmtSize(x.size)+"）。")) return;
+      await withLoading(b, async ()=>{
+        const r = await api({action:"restore", sha256:x.sha256, size:x.size, name:x.name.replace(/\.cas$/,""), parent:x.parent});
+        dbg(r);
+        if(r.ok){
+          b.textContent = "已恢复 ✔";
+          tr.querySelector("td:nth-child(3)").innerHTML = '<span class="ok">✔ 已恢复</span>';
+          showToast("已恢复 ✔","success");
+        } else {
+          b.textContent = "失败";
+          tr.querySelector("td:nth-child(3)").innerHTML = '<span class="err">✘ '+esc(r.error)+'</span>';
+          showToast("恢复失败："+r.error,"error");
+        }
+      }, "恢复中…");
     };
     td.appendChild(b);
     tr.appendChild(td);

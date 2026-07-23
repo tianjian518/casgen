@@ -58,8 +58,18 @@
   <span class="navspacer"></span>
 </nav>
 
-<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.6</span></h1>
-<p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。先登录、选好文件夹，再用上方导航进入各功能。</p>
+<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.7</span></h1>
+<p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。</p>
+
+<!-- 使用三步 -->
+<div class="card">
+  <h3>📖 使用三步</h3>
+  <ol class="muted" style="line-height:1.9; margin:8px 0 0; padding-left:22px;">
+    <li>浏览器登录 139 云盘 → F12 抓包复制 <code>Authorization</code> 头 → 下面粘贴 → 点「登录」</li>
+    <li>展开目录选好目标文件夹 → 用顶部导航去「🔄 转换CAS」或「📥 分享」一键处理</li>
+    <li>用 <a href="https://github.com/OpenListTeam/OpenList/releases" target="_blank" style="color:#2563eb">光鸭版 OpenList</a> / <b>网易爆米花</b> / <b>飞牛影视</b> 挂载云盘，点 <code>.cas</code> 文件直接零流量播放</li>
+  </ol>
+</div>
 
 <!-- 登录 -->
 <div class="card">
@@ -102,41 +112,29 @@
 <script>
 let state = { currentParent: "root", selectedRoot: "root", selectedName: "", path: [["root","根目录"]] };
 
-// ========== 自动重登逻辑 ==========
-async function doAutoReLogin(originalPayload){
-  const saved = readLocal("casgen_auth");
-  if(!saved) return null;
-  const prov = readLocal("casgen_prov") || "139";
-  const loginR = await api({action:"login", provider:prov, authorization:saved});
-  if(!loginR || !loginR.ok) return null;
-  // 重试原请求
-  try {
-    const resp = await fetch("/", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(originalPayload)});
-    return await resp.json();
-  } catch(e){
-    return {ok:false, error:"请求失败: "+e.message};
-  }
-}
-
 // ========== 登录 ==========
 document.getElementById("loginBtn").onclick = async () => {
+  const btn = document.getElementById("loginBtn");
   const prov = document.querySelector('input[name=prov]:checked').value;
   const auth = document.getElementById("auth").value.trim();
   const msg = document.getElementById("loginMsg");
   msg.innerHTML = "登录中…";
-  try {
-    const r = await api({action:"login", provider:prov, authorization:auth});
-    dbg(r);
-    if (r.version) document.getElementById("ver").textContent = "v"+r.version;
-    if (!r.ok){ msg.innerHTML = '<span class="err">失败：'+esc(r.error)+'</span>'; return; }
-    msg.innerHTML = '<span class="ok">登录成功 ✔ 根目录共 '+(r.count||0)+' 个项目</span> <span class="muted">[版本 '+(r.version||"未知")+']</span>';
-    document.getElementById("browseCard").style.display = "block";
-    try { writeLocal("casgen_auth", auth); writeLocal("casgen_prov", prov); }catch(e){}
-    state.path = [["root","根目录"]];
-    renderCrumb();
-    renderFolders(r.root || []);
-    checkAuth();
-  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+  await withLoading(btn, async ()=>{
+    try {
+      const r = await api({action:"login", provider:prov, authorization:auth});
+      dbg(r);
+      if (r.version) document.getElementById("ver").textContent = "v"+r.version;
+      if (!r.ok){ msg.innerHTML = '<span class="err">失败：'+esc(r.error)+'</span>'; showToast("登录失败："+r.error,"error"); return; }
+      msg.innerHTML = '<span class="ok">登录成功 ✔ 根目录共 '+(r.count||0)+' 个项目</span> <span class="muted">[版本 '+(r.version||"未知")+']</span>';
+      showToast("登录成功 ✔","success");
+      document.getElementById("browseCard").style.display = "block";
+      try { writeLocal("casgen_auth", auth); writeLocal("casgen_prov", prov); }catch(e){}
+      state.path = [["root","根目录"]];
+      renderCrumb();
+      renderFolders(r.root || []);
+      checkAuth();
+    } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
+  }, "登录中…");
 };
 
 // ========== 目录浏览 ==========

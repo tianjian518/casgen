@@ -229,3 +229,17 @@ def start_scheduler():
     if _scheduler is None or not _scheduler.is_alive():
         _scheduler = MonitorScheduler()
         _scheduler.start()
+
+
+def stop_scheduler():
+    """优雅停止调度器（守护线程会自行退出）。供 SIGTERM/Ctrl+C 优雅停机用。"""
+    global _scheduler
+    if _scheduler is not None and _scheduler.is_alive():
+        try:
+            _scheduler.stop()
+        except Exception:
+            pass
+
+
+def is_scheduler_running():
+    return _scheduler is not None and _scheduler.is_alive()

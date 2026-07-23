@@ -107,8 +107,14 @@ async function doRename(dry){
   }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
 }
 
-document.getElementById("renamePreviewBtn").onclick = ()=> doRename(true);
-document.getElementById("renameExecBtn").onclick = ()=> doRename(false);
+document.getElementById("renamePreviewBtn").onclick = ()=> withLoading(document.getElementById("renamePreviewBtn"), ()=>doRename(true), "预览中…");
+document.getElementById("renameExecBtn").onclick = async ()=>{
+  const btn = document.getElementById("renameExecBtn");
+  const root = readLocal("casgen_selected_root") || "root";
+  const name = readLocal("casgen_selected_name") || "根目录";
+  if(!confirm("确认对「"+esc(name)+"」（"+esc(root)+"）执行 L1 正则改名？这将直接修改云盘文件名。\n\n建议先点「① 预览」确认改名清单。")) return;
+  await withLoading(btn, ()=>doRename(false), "改名中…");
+};
 </script>
 </body>
 </html>
