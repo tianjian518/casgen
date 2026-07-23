@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>网盘影视 CAS 工具 v2.0</title>
+<title>移动云盘 · 影视文件 CAS 瘦身工具</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
@@ -34,12 +34,21 @@
   .topnav .navspacer { margin-left:auto; }
   .navfolder { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:8px 12px; margin:0 0 12px; font-size:13px; }
   .navfolder b { color:#15803d; }
+  /* 首页品牌标题：彩色渐进 + 版本胶囊 */
+  .brand-title { font-size: 26px; font-weight: 800; margin: 4px 0 10px; line-height: 1.2;
+    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 50%, #ec4899 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent; display: inline-block; }
+  .ver-chip { display:inline-block; vertical-align: middle; margin-left:10px;
+    background: #f3f4f6; border:1px solid #e5e7eb; color:#374151;
+    -webkit-text-fill-color:#374151;
+    font-size:13px; font-weight:600; padding:3px 10px; border-radius:999px; }
   .selected-info { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:13px; }
 </style>
 </head>
 <body>
 <nav class="topnav">
-  <span class="brand">🎬 CAS工具</span>
+  <span class="brand">🎬 CAS瘦身</span>
   <a href="index.html" class="active">🏠 首页</a>
   <a href="convert.html">🔄 转换CAS</a>
   <a href="restore.html">▶️ 恢复</a>
@@ -49,7 +58,7 @@
   <span class="navspacer"></span>
 </nav>
 
-<h1>🎬 网盘影视 CAS 工具 <span id="ver" class="muted">v4.0</span></h1>
+<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.6</span></h1>
 <p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。先登录、选好文件夹，再用上方导航进入各功能。</p>
 
 <!-- 登录 -->

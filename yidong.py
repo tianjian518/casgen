@@ -32,7 +32,7 @@ VIDEO_EXT = {
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
-__version__ = "4.0.0"
+__version__ = "4.6.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -755,7 +755,8 @@ class Yun139:
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": name,
             "type": "file",
-            "fileRenameMode": "overwrite",
+            # 注意：139 真机 /file/create 拒收 fileRenameMode 字段（任意取值均 04000002），
+            # 与 upload_cas 一致移除；重复文件由下方 exist/rapidUpload 分支处理。
         }
         resp = self.personal_post("/file/create", body)
         if isinstance(resp, dict) and (resp.get("_raw") is not None or resp.get("_error") is not None):
@@ -821,6 +822,7 @@ class Yun139:
         if not public_url:
             raise Exception("未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm")
         results = []
+        existing_cache = {}
         for rel, it in self.walk(root):
             if not rel.lower().endswith(".cas"):
                 continue
@@ -829,6 +831,18 @@ class Yun139:
             strm_name = base + ".strm"
             strm_url = "%s/cas/%s" % (public_url, rel)
             parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
+            # 已存在同名 .strm 则跳过，支持重复运行且避免 139 重复文件报错
+            cache = existing_cache.get(parent)
+            if cache is None:
+                try:
+                    cit, _, _ = self.list_dir(parent)
+                    cache = {self._name(x) for x in cit}
+                except Exception:
+                    cache = set()
+                existing_cache[parent] = cache
+            if strm_name in cache:
+                results.append({"name": strm_name, "status": "skipped_existing", "url": strm_url})
+                continue
             try:
                 up = self.upload_text_file(strm_name, strm_url, parent)
                 fid = (up.get("_file_id") or up.get("fileId")
