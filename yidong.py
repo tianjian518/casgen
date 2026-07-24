@@ -403,7 +403,7 @@ class Yun139:
         return None
 
     @staticmethod
-    def build_cas(name, size, sha256, md5="", parent_file_id=""):
+    def build_cas(name, size, sha256, md5="", parent_file_id="", file_id=""):
         payload = {
             "provider": "139",
             "name": name,
@@ -414,6 +414,7 @@ class Yun139:
             "preID": "",
             "sha256": sha256,
             "parentFileId": parent_file_id,
+            "fileId": file_id,
             "create_time": str(int(time.time())),
         }
         return base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
@@ -615,9 +616,9 @@ class Yun139:
                     pass
             results.append({"name": f"[已删除 {ok_del}/{len(to_delete)} 个原视频]", "status": "deleted"})
         # 上传 .cas（若已删原视频，此时空间已释放）
-        for (name, size, sha, parent, _, ch) in records:
+        for (name, size, sha, parent, fid, ch) in records:
             cas_name = name + ".cas"
-            content = self.build_cas(name, size, sha, ch, parent)
+            content = self.build_cas(name, size, sha, ch, parent, fid)
             try:
                 up = self.upload_cas(cas_name, content, parent)
                 fid = up.get("_file_id") or up.get("fileId") or (up.get("data") or {}).get("fileId")
@@ -730,6 +731,19 @@ class Yun139:
         sha256 = payload.get("sha256", "")
         size = payload.get("size", 0)
         name = payload.get("name") or (cas_name[:-4] if cas_name.endswith(".cas") else cas_name)
+        # PRIORITY: if the original video still exists (same dir, same name), play it
+        # directly via its download link. Avoids 139 rapid-upload restore which fails
+        # for deleted originals (code 04010319 “权益不足”).
+        parent = payload.get("parentFileId") or ""
+        if parent:
+            try:
+                orig_fid = self._find_file_readonly(name, parent)
+                if orig_fid:
+                    url = self.get_download_link(orig_fid)
+                    if url:
+                        return url, None  # play original directly, no temp file
+            except Exception:
+                pass
         if not sha256:
             raise Exception(".cas 缺少 sha256，无法秒传恢复")
         temp_dir = self.ensure_temp_dir()
