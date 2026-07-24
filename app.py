@@ -401,9 +401,12 @@ class H(BaseHTTPRequestHandler):
         # 前端 strm.html 发送 action:"strm_create"，兼容旧版 "generate_strm"
         if action in ("generate_strm", "strm_create"):
             root = p.get("root", "root") or "root"
+            root_path = (p.get("rootPath") or "").strip()
+            # 旧 .strm 自动清理：勾选后删除同名旧 .strm 再重新生成（v5.0）
+            clean_old = bool(p.get("clean_old", False))
             public_url = (p.get("publicUrl") or os.environ.get("CASGEN_PUBLIC_URL", "")).strip()
             try:
-                results = CLIENT.generate_strm(root, public_url)
+                results = CLIENT.generate_strm(root, public_url, path_prefix=root_path, clean_old=clean_old)
                 ok_n = sum(1 for r in results if r.get("status") == "uploaded")
                 return self._json({"ok": True, "count": len(results),
                                    "uploaded": ok_n, "results": results,

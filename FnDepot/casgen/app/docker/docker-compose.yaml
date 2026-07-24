@@ -4,4 +4,11 @@ services:
     container_name: casgen
     ports:
       - "${APP_PORT:-5000}:5000"
+    environment:
+      - PORT=5000
+      - CASGEN_PUBLIC_URL=http://<你的IP>:5000   # 生成 .strm 必需
+      - CASGEN_CAS_CLEANUP_DELAY=3600
+      - CASGEN_WEBDAV_USER=
+      - CASGEN_WEBDAV_PASS=
+      - CASGEN_WEBDAV_ROOT=root
     restart: unless-stopped

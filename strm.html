@@ -55,6 +55,9 @@
     <div class="sub">CAS→Strm 功能需要环境变量 <code>CASGEN_PUBLIC_URL</code>（如 http://你的IP:5000），否则生成的 .strm 无法被播放器访问。</div>
   </div>
   <p class="muted">遍历所选文件夹下所有 .cas（含子目录），为每个生成同名 .strm，内容指向 casgen 网关播放地址。</p>
+  <label style="display:flex; align-items:center; gap:6px; font-weight:400;">
+    <input type="checkbox" id="cleanOld"> 删除已存在的旧 .strm 后重新生成（不勾则跳过已存在的）
+  </label>
   <button id="genBtn">🚀 开始生成</button>
   <div id="convMsg" class="muted"></div>
   <table id="strmTable"><thead><tr><th>文件名</th><th>Status</th></tr></thead><tbody></tbody></table>
@@ -72,6 +75,7 @@
 <script>
 // ========== 从 localStorage 读取上次选择的文件夹 ==========
 const selRoot = readLocal("casgen_selected_root") || "root";
+const selPath = readLocal("casgen_selected_path") || "";
 const selName = readLocal("casgen_selected_name") || "根目录";
 document.getElementById("navFolder").textContent = selName + "（" + selRoot + "）";
 
@@ -95,7 +99,13 @@ document.getElementById("genBtn").onclick = async () => {
     const msg = document.getElementById("convMsg");
     msg.textContent = "生成中…";
     try {
-      const r = await api({ action: "strm_create", root: selRoot });
+      // 路径完整性前端校验：选了子目录但未获取到完整路径时，提示去首页重选
+      if (selRoot && selRoot !== "root" && !selPath) {
+        msg.innerHTML = '<span class="err">未获取到完整目录路径，请到首页重新点「✔ 选定此文件夹」后再生成。</span>';
+        showToast("请先在首页重新选定文件夹", "error");
+        return;
+      }
+      const r = await api({ action: "strm_create", root: selRoot, rootPath: selPath, clean_old: document.getElementById("cleanOld").checked });
       dbg(r);
       if (!r.ok) { msg.innerHTML='<span class="err">'+esc(r.error)+'</span>'; showToast("生成失败："+r.error,"error",5000); return; }
       // 后端返回 status: uploaded / skipped_existing / failed

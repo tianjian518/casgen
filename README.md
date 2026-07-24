@@ -188,7 +188,12 @@ casgen/
 
 ## 十一、版本说明
 
-- **v4.9.0（当前）**：新增 WebDAV 服务 ——
+- **v5.0.0**：修复 .strm 链接缺失上层目录导致无法播放的关键 bug + 三项增强 ——
+  - **修复（关键）**：`.strm` 内链接此前只含选中目录及其子目录（缺从云盘根到所选目录的上层路径），播放网关从云盘根解析失败。现前端把完整路径（如 `电影/科幻`）一并传给后端，`walk` 用 `path_prefix` 拼出完整相对路径，链接形如 `http://IP:5000/cas/电影/科幻/星际穿越/xxx.cas`，可正确解析播放。
+  - **旧 .strm 自动清理**：Strm 页新增「删除已存在的旧 .strm 后重新生成」选项，勾选后自动删除同名旧文件再重写，免去手动清理（升级后旧版错误链接需重生成）。
+  - **路径完整性校验**：未取到完整目录路径时，前端提示去首页重选、后端 `generate_strm` 显式报错，避免生成无效 `.strm`。
+  - **集成包同步**：FnDepot / fnOS 部署清单补充 WebDAV 与 `CASGEN_PUBLIC_URL` 等环境变量，支持新功能开箱即用。
+- **v4.9.0**：新增 WebDAV 服务 ——
   - 同端口 `/dav/` 前缀提供 WebDAV 协议，播放器可直接挂载 139 云盘里的 `.strm` 文件。
   - 支持 WebDAV 方法：OPTIONS / PROPFIND / GET / HEAD / PUT / DELETE / MKCOL / MOVE / LOCK / UNLOCK。
   - Basic Auth 认证，独立用户名/密码通过 `CASGEN_WEBDAV_USER` / `CASGEN_WEBDAV_PASS` 配置；未配置时 WebDAV 禁用并返回 503。

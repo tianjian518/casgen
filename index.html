@@ -206,6 +206,11 @@ document.getElementById("useFolderBtn").onclick = () => {
   try {
     localStorage.setItem("casgen_selected_root", state.selectedRoot);
     localStorage.setItem("casgen_selected_name", state.selectedName);
+    // 保存从云盘根到选中目录的完整相对路径（如 "电影/科幻"），修复 .strm 链接缺失上层目录导致无法播放
+    try {
+      const pathParts = state.path.slice(1).map(p => p[1]);
+      localStorage.setItem("casgen_selected_path", pathParts.join("/"));
+    } catch(e){}
     document.getElementById("selInfoText").textContent = state.selectedName + "（" + state.selectedRoot + "）";
     document.getElementById("selectedInfo").style.display = "block";
   }catch(e){}

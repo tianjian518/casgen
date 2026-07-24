@@ -9,3 +9,5 @@
 
 > 注意：`casgen.fpk` 里的镜像地址 `ghcr.io/<你的用户名>/casgen:latest` 需要先把主仓库 `casgen` 推到 GitHub（Actions 会自动构建镜像）。
 > 安装前请先在真机点一次安装测试；若 FnDepot 客户端对 `.fpk` 内部结构有微调要求，以客户端报错为准就地改 `casgen.fpk` 内的 `docker-compose.yaml`。
+
+> 当前内置版本：**casgen v5.0.0**。`.strm` 生成已修复路径问题，并支持「旧 .strm 自动清理」与 WebDAV 挂载（见主仓库 README）。

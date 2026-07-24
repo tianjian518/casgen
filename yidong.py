@@ -32,7 +32,7 @@ VIDEO_EXT = {
 
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 4.9.0：新增 WebDAV 服务（/dav/），播放器可直接挂载 .strm 文件
-__version__ = "4.9.0"
+__version__ = "5.0.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -812,7 +812,12 @@ class Yun139:
         raise FileNotFoundError("文件不存在: %s" % name)
 
     # ======================== [4.0] .strm 生成器 ========================
-    def walk(self, root, prefix="", _parent=None):
+    @staticmethod
+    def _join_path(*parts):
+        """拼接路径片段，忽略空片段。确保 .strm 链接包含从云盘根到文件的上层目录。"""
+        return "/".join(p for p in parts if p)
+
+    def walk(self, root, prefix="", path_prefix="", _parent=None):
         """递归遍历 root 下所有文件，yield (相对路径, item)。item 注入 _parent（父目录 fileId）。"""
         parent_id = _parent if _parent is not None else root
         cursor = None
@@ -826,22 +831,27 @@ class Yun139:
                 rec["_parent"] = parent_id
                 if self._is_folder(it):
                     sub = (prefix + "/" + name) if prefix else name
-                    yield from self.walk(self._fid(it), sub, self._fid(it))
+                    yield from self.walk(self._fid(it), sub, path_prefix, self._fid(it))
                 else:
                     rel = (prefix + "/" + name) if prefix else name
-                    yield rel, rec
+                    yield self._join_path(path_prefix, rel), rec
             if not cursor:
                 break
 
-    def generate_strm(self, root, public_url):
+    def generate_strm(self, root, public_url, path_prefix="", clean_old=False):
         """遍历 root 下所有 .cas，为每个生成同名 .strm（内容指向 casgen 网关 URL），上传到同目录。
         public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外可达地址）。"""
         public_url = (public_url or "").rstrip("/")
+        # 路径完整性校验：root 非根目录时必须提供 path_prefix（从云盘根到所选目录的完整路径），
+        # 否则生成的 .strm 链接会缺失上层目录，播放网关从云盘根解析将失败、无法播放。
+        if root not in ("root", "/", "") and not path_prefix:
+            raise Exception("无法获取完整目录路径（path_prefix 为空）。请在首页重新点「✔ 选定此文件夹」后再生成 .strm。")
         if not public_url:
             raise Exception("未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm")
         results = []
         existing_cache = {}
-        for rel, it in self.walk(root):
+        for rel, it in self.walk(root, path_prefix=path_prefix):
+            cleaned = False
             if not rel.lower().endswith(".cas"):
                 continue
             cas_name = self._name(it)
@@ -854,13 +864,26 @@ class Yun139:
             if cache is None:
                 try:
                     cit, _, _ = self.list_dir(parent)
-                    cache = {self._name(x) for x in cit}
+                    cache = {self._name(x): self._fid(x) for x in cit}
                 except Exception:
                     cache = set()
                 existing_cache[parent] = cache
+            # 旧 .strm 处理：clean_old=True 时先删除同名旧的再重写；否则跳过以保留
             if strm_name in cache:
-                results.append({"name": strm_name, "status": "skipped_existing", "url": strm_url})
-                continue
+                if clean_old:
+                    old_fid = cache.pop(strm_name, None)
+                    if old_fid:
+                        try:
+                            self.delete([old_fid])
+                            cleaned = True
+                        except Exception as de:
+                            results.append({"name": strm_name, "status": "clean_failed",
+                                            "url": strm_url,
+                                            "error": "删除旧 .strm 失败：%s（保留旧文件）" % de})
+                            continue
+                else:
+                    results.append({"name": strm_name, "status": "skipped_existing", "url": strm_url})
+                    continue
             try:
                 up = self.upload_text_file(strm_name, strm_url, parent)
                 fid = (up.get("_file_id") or up.get("fileId")
@@ -868,7 +891,7 @@ class Yun139:
                 ok = bool(fid) and not up.get("_upload_error") and not up.get("_complete_error")
                 results.append({
                     "name": strm_name,
-                    "status": "uploaded" if ok else "failed",
+                    "status": ("recreated" if cleaned else "uploaded") if ok else "failed",
                     "url": strm_url,
                     "error": up.get("_upload_error") or up.get("_complete_error"),
                 })
