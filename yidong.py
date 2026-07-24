@@ -283,9 +283,9 @@ class Yun139:
         return self.host
 
     # ---------- 个人云请求封装 ----------
-    def personal_post(self, path, body):
+    def personal_post(self, path, body, headers=None):
         host = self._ensure_host()
-        data = self._post_json(host + path, self.personal_headers, body)
+        data = self._post_json(host + path, headers or self.personal_headers, body)
         # 统一在个人云层识别登录失效，命中即抛 TokenExpired，
         # 上层（app.py 路由 / 监控线程）捕获后提示重登并暂停。
         _detect_auth_failure(data)
@@ -508,28 +508,74 @@ class Yun139:
         return self.upload_file(name, text, parent, "text/plain")
 
     # ---------- 恢复（按 sha256 秒传，未实测） ----------
+    # ---------- 139 秒传恢复专用 PC 客户端请求头 ----------
+    # 光鸭版 OpenList 实测：139 的 /file/create 秒传恢复必须用 PC 客户端请求头，
+    # 用 web 头会被拒（04010319 权益不足），导致 .cas 全部无法播放。
+    _PC_APP_VERSION = "8.7.2.20260519"
+    _PC_APP_CHANNEL = "10200153"
+
+    def _pc_device_id(self):
+        h = _md5(self.account)
+        return "OPENLIST" + h[:16].upper() + "-PC"
+
+    def _pc_device_info(self):
+        return ("||11|%s|PC|QkYtMjAyMDAzMTAxNjQ3|%s|| Windows 10 (10.0)|1920X1040|"
+                "Q2hpbmVzZSAoU2ltcGxpZmllZCk=|||") % (self._PC_APP_VERSION, self._pc_device_id())
+
+    def pc_personal_headers(self):
+        h = dict(self.personal_headers)
+        dev = self._pc_device_info()
+        h["x-DeviceInfo"] = dev
+        h["x-huawei-channelSrc"] = self._PC_APP_CHANNEL
+        h["x-MM-Source"] = "000"
+        h["x-yun-api-version"] = "v1"
+        h["x-yun-app-channel"] = self._PC_APP_CHANNEL
+        h["x-yun-client-info"] = dev
+        h["x-yun-device-id"] = self._pc_device_id()
+        h["x-yun-device-info"] = dev
+        h["x-yun-market-source"] = "000"
+        h["x-yun-module-type"] = "100"
+        h["x-yun-op-type"] = "1"
+        h["x-yun-svc-type"] = "1"
+        h["x-ExpRoute-Code"] = "routeCode=%s,type=2" % self.account
+        return h
+
     def restore(self, sha256, size, name, parent):
         body = {
             "contentHash": sha256,
             "contentHashAlgorithm": "SHA256",
             "contentType": "application/octet-stream",
             "parallelUpload": False,
-            "partInfos": [{"partNumber": 1, "partSize": size}],
+            "partInfos": [{"partNumber": 1, "partSize": size, "parallelHashCtx": sha256}],
             "size": size,
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": name,
             "type": "file",
             "fileRenameMode": "auto_rename",
         }
-        resp = self.personal_post("/file/create", body)
-        d = resp.get("data") if isinstance(resp, dict) else None
-        fid = resp.get("fileId") or (d.get("fileId") if isinstance(d, dict) else None)
-        if fid:
+        # 光鸭版 OpenList 验证：139 秒传恢复必须用 PC 客户端请求头，
+        # web 头会被拒（04010319 权益不足）。先试 PC 头，PC 调用异常再回退 web 头。
+        last_exc = None
+        for hdrs in (self.pc_personal_headers(), self.personal_headers):
             try:
-                resp["_verify_found"] = self._verify_file(parent, fid)
-            except Exception:
-                resp["_verify_found"] = "verify_error"
-        return resp
+                resp = self.personal_post("/file/create", body, headers=hdrs)
+            except Exception as e:
+                last_exc = e
+                continue
+            if isinstance(resp, dict) and (resp.get("_error") or resp.get("_raw") is not None):
+                last_exc = Exception(str(resp))
+                continue
+            d = resp.get("data") if isinstance(resp, dict) else None
+            fid = resp.get("fileId") or (d.get("fileId") if isinstance(d, dict) else None)
+            if fid:
+                try:
+                    resp["_verify_found"] = self._verify_file(parent, fid)
+                except Exception:
+                    resp["_verify_found"] = "verify_error"
+                return resp
+            # 调用成功但无 fileId：秒传失败（哈希不在云端去重池），为权威结果，不再重试
+            raise Exception("139 秒传恢复失败（云端去重池可能无此源）: %r" % (resp,))
+        raise Exception("139 秒传恢复失败（请求异常）: %s" % (last_exc,))
 
     # ---------- 删除（进回收站，未实测） ----------
     def delete(self, file_ids):

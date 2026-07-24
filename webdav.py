@@ -14,6 +14,7 @@ import hmac
 import os
 import time
 import urllib.parse
+import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 import xml.sax.saxutils as saxutils
@@ -25,6 +26,14 @@ WEBDAV_USER = os.environ.get("CASGEN_WEBDAV_USER", "").strip()
 WEBDAV_PASS = os.environ.get("CASGEN_WEBDAV_PASS", "").strip()
 WEBDAV_ROOT = os.environ.get("CASGEN_WEBDAV_ROOT", "root").strip() or "root"
 WEBDAV_ENABLED = bool(WEBDAV_USER and WEBDAV_PASS)
+
+# 播放代理开关：默认开启。开启后 WebDAV .strm/.cas 播放由 casgen 自己带 Referer
+# 从 139 拉流再转发给播放器，彻底绕开「302 跟随 + Referer 缺失」导致的网易爆米花
+# 等播放器报「网络错误 / WebDAV 地址错误」。设为 0/false/no 时回退为 302 直链。
+PROXY_STREAM = os.environ.get("CASGEN_PROXY_STREAM", "1").strip().lower() not in ("0", "false", "no", "")
+
+# 139 直链必需的 Referer（139 防盗链要求，缺失会 403）
+_139_REFERER = "https://yun.139.com/"
 
 # 解析后的根目录 catalogID 会在首次使用时填充
 _WEBDAV_ROOT_FID = None
@@ -421,6 +430,95 @@ def _extract_cas_path(url):
 
 
 # =============================================================================
+# 播放代理：由 casgen 拉 139 直链并转发，绕开 302 跟随 + Referer 限制
+# =============================================================================
+class _RefererRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """重定向时保留 Referer（139 CDN 跨域跳转仍需防盗链 Referer）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newreq = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if newreq is not None and "Referer" in req.headers:
+            try:
+                newreq.add_header("Referer", req.headers["Referer"])
+            except Exception:
+                pass
+        return newreq
+
+
+_PROXY_OPENER = urllib.request.build_opener(_RefererRedirectHandler())
+
+
+def _proxy_stream(handler, url, schedule_cleanup_fn=None, temp_fid=None):
+    """代理转发 139 直链给播放器（支持 Range 拖动进度）。
+
+    casgen 自己带 Referer 从 139 拉流，再以 200/206 原样转发给客户端，规避两件事：
+      1) 播放器（网易爆米花）不跟随 302 → 直接当作「网络错误 / WebDAV 地址错误」；
+      2) 播放器跟随 302 却不带 Referer → 139 防盗链 403。
+    流式转发（分块读），不把整段视频读进内存。
+    """
+    resp = None
+    headers_sent = False
+    try:
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": _139_REFERER,
+            "Accept": "*/*",
+        }
+        rng = handler.headers.get("Range")
+        if rng:
+            req_headers["Range"] = rng
+
+        req = urllib.request.Request(url, headers=req_headers)
+        resp = _PROXY_OPENER.open(req, timeout=60)
+
+        handler.send_response(resp.getcode())
+        handler.send_header("Content-Type", resp.headers.get("Content-Type", "application/octet-stream"))
+        cl = resp.headers.get("Content-Length")
+        if cl is not None:
+            handler.send_header("Content-Length", cl)
+        ar = resp.headers.get("Accept-Ranges")
+        if ar:
+            handler.send_header("Accept-Ranges", ar)
+        cr = resp.headers.get("Content-Range")
+        if cr:
+            handler.send_header("Content-Range", cr)
+        cd = resp.headers.get("Content-Disposition")
+        if cd:
+            handler.send_header("Content-Disposition", cd)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        headers_sent = True
+
+        chunk = 256 * 1024
+        while True:
+            data = resp.read(chunk)
+            if not data:
+                break
+            handler.wfile.write(data)
+            try:
+                handler.wfile.flush()
+            except Exception:
+                pass
+    except urllib.error.HTTPError as e:
+        if not headers_sent:
+            _send_webdav_error(handler, e.code, "139 直链返回错误: %s" % e)
+    except Exception as e:
+        if not headers_sent:
+            _send_webdav_error(handler, 502, "代理拉流失败: %s" % e)
+    finally:
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        if schedule_cleanup_fn and temp_fid:
+            try:
+                schedule_cleanup_fn(temp_fid)
+            except Exception:
+                pass
+
+
+# =============================================================================
 # WebDAV 方法实现
 # =============================================================================
 def handle_options(handler):
@@ -521,12 +619,15 @@ def handle_get(handler, schedule_cleanup_fn=None):
                 cas_fid = client.resolve_path_readonly(cas_path)
                 cas_name = cas_path.rsplit("/", 1)[-1]
                 url, temp_fid = client.cas_get_play_link(cas_fid, cas_name)
-                if schedule_cleanup_fn and temp_fid:
-                    schedule_cleanup_fn(temp_fid)
-                handler.send_response(302)
-                handler.send_header("Location", url)
-                handler.send_header("Content-Length", "0")
-                handler.end_headers()
+                if PROXY_STREAM:
+                    _proxy_stream(handler, url, schedule_cleanup_fn, temp_fid)
+                else:
+                    if schedule_cleanup_fn and temp_fid:
+                        schedule_cleanup_fn(temp_fid)
+                    handler.send_response(302)
+                    handler.send_header("Location", url)
+                    handler.send_header("Content-Length", "0")
+                    handler.end_headers()
                 return
             except FileNotFoundError:
                 _send_webdav_error(handler, 404, ".cas 文件不存在: %s" % cas_path)
@@ -535,7 +636,7 @@ def handle_get(handler, schedule_cleanup_fn=None):
                 _send_webdav_error(handler, 500, "CAS 播放失败: %s" % e)
                 return
         else:
-            # 外部 URL，直接 302
+            # 外部 URL，仍走 302（避免把 casgen 变成任意外链代理/SSRF）
             handler.send_response(302)
             handler.send_header("Location", strm_content)
             handler.send_header("Content-Length", "0")
@@ -547,12 +648,15 @@ def handle_get(handler, schedule_cleanup_fn=None):
     if name.lower().endswith(".cas"):
         try:
             url, temp_fid = client.cas_get_play_link(fid, name)
-            if schedule_cleanup_fn and temp_fid:
-                schedule_cleanup_fn(temp_fid)
-            handler.send_response(302)
-            handler.send_header("Location", url)
-            handler.send_header("Content-Length", "0")
-            handler.end_headers()
+            if PROXY_STREAM:
+                _proxy_stream(handler, url, schedule_cleanup_fn, temp_fid)
+            else:
+                if schedule_cleanup_fn and temp_fid:
+                    schedule_cleanup_fn(temp_fid)
+                handler.send_response(302)
+                handler.send_header("Location", url)
+                handler.send_header("Content-Length", "0")
+                handler.end_headers()
             return
         except Exception as e:
             _send_webdav_error(handler, 500, "CAS 播放失败: %s" % e)
