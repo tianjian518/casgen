@@ -141,8 +141,14 @@ function finishStrmTask(r){
   genBtn.textContent = "🚀 开始生成";
   if (r.phase === "error"){
     progFill.className = "progress-fill";
-    convMsg.innerHTML = '<span class="err">生成失败：'+esc(r.error||"未知错误")+'</span>';
-    showToast("生成失败："+ (r.error||"未知错误"), "error", 6000);
+    if (r.needLogin){
+      convMsg.innerHTML = '<span class="err">生成失败：'+esc(r.error||"登录已失效")+'</span> <a href="index.html">去首页重新登录</a>';
+      if (typeof showAuthBanner === "function") showAuthBanner();
+      showToast("登录已失效，请返回首页重新粘贴令牌", "error", 8000);
+    } else {
+      convMsg.innerHTML = '<span class="err">生成失败：'+esc(r.error||"未知错误")+'</span>';
+      showToast("生成失败："+ (r.error||"未知错误"), "error", 6000);
+    }
     return;
   }
   const created = r.created||0, skipped = r.skipped||0, failed = r.failed||0, cleaned = r.cleaned||0;

@@ -143,7 +143,7 @@ def _run_strm_task(task_id, root, public_url, root_path, clean_old):
                     cleaned += 1
             elif s == "skipped_existing":
                 skipped += 1
-            elif s in ("failed", "clean_failed"):
+            elif s in ("failed", "clean_failed", "scan_failed"):
                 failed += 1
         with _STRM_LOCK:
             t = _STRM_TASKS.get(task_id)
@@ -151,6 +151,14 @@ def _run_strm_task(task_id, root, public_url, root_path, clean_old):
                 t.update({"finished": True, "phase": "done", "created": created,
                           "skipped": skipped, "failed": failed, "cleaned": cleaned,
                           "results": results, "error": None})
+    except TokenExpired as e:
+        import traceback
+        traceback.print_exc()
+        with _STRM_LOCK:
+            t = _STRM_TASKS.get(task_id)
+            if t:
+                t.update({"finished": True, "phase": "error", "needLogin": True,
+                          "error": "登录已失效（令牌过期）：请返回首页重新粘贴有效的 139 令牌后再生成。"})
     except Exception as e:
         import traceback
         traceback.print_exc()

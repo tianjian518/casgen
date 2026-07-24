@@ -840,7 +840,7 @@ class Yun139:
 
     def generate_strm(self, root, public_url, path_prefix="", clean_old=False, progress_cb=None):
         """遍历 root 下所有 .cas，为每个生成同名 .strm（内容指向 casgen 网关 URL），上传到同目录。
-        public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外可址）。
+        public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外地址）。
         progress_cb(dict): 可选进度回调，用于前端实时显示进度，dict 含 phase/scanned/cas_found/done/total/name 等。"""
         public_url = (public_url or "").rstrip("/")
         if root not in ("root", "/", "") and not path_prefix:
@@ -858,12 +858,20 @@ class Yun139:
         # ---------- 阶段一：扫描目录树，收集所有 .cas 条目（不上传，仅统计） ----------
         cas_entries = []
         scanned = 0
-        for rel, it in self.walk(root, path_prefix=path_prefix):
-            scanned += 1
-            if rel.lower().endswith(".cas"):
-                cas_entries.append((rel, it))
-            if scanned % 25 == 0:
-                _report(phase="scan", scanned=scanned, cas_found=len(cas_entries))
+        scan_error = None
+        try:
+            for rel, it in self.walk(root, path_prefix=path_prefix):
+                scanned += 1
+                if rel.lower().endswith(".cas"):
+                    cas_entries.append((rel, it))
+                if scanned % 25 == 0:
+                    _report(phase="scan", scanned=scanned, cas_found=len(cas_entries))
+        except Exception as e:
+            # 遍历中途某个目录异常（个别目录报错 / 令牌过期）：记录后继续用已收集条目，
+            # 不让整个任务中断，否则一个坏目录会导致全部 .strm 都没生成。
+            scan_error = str(e)
+            _report(phase="scan", scanned=scanned, cas_found=len(cas_entries),
+                    note="scan interrupted: %s" % scan_error)
         total = len(cas_entries)
         _report(phase="scan", scanned=scanned, cas_found=total)
         _report(phase="gen", done=0, total=total)
@@ -916,6 +924,10 @@ class Yun139:
                 })
             except Exception as e:
                 results.append({"name": strm_name, "status": "failed", "error": str(e)})
+        # 遍历阶段若曾中断（个别目录异常 / 令牌过期），把被跳过的目录记入结果，便于用户感知
+        if scan_error:
+            results.append({"name": "（部分目录遍历失败，已跳过）", "status": "scan_failed",
+                            "error": scan_error})
         _report(phase="done", done=total, total=total)
         return results
 
