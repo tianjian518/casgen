@@ -740,28 +740,40 @@ def main():
     monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
 
     def _restore_auth():
-        """后台线程：异步恢复持久化登录态，绝不阻塞 HTTP 服务启动。"""
+        """后台线程：异步恢复登录态，绝不阻塞 HTTP 服务启动。
+        优先级：① 本地持久化 casgen_auth.json（网页手动登录） ② 环境变量 CASGEN_TOKEN
+        （HF / 容器部署用，写在 Secret/Env 里，重建不丢，最适合无人值守）。"""
+        token = None
         try:
             auth = _load_auth()
-            if not auth or not auth.get("token"):
-                return
-            c = Yun139(auth["token"])
-            try:
-                c.list_dir("root")  # 轻量校验 token 是否仍有效
-                AUTH_EXPIRED = False
-            except TokenExpired:
-                # token 已过期：不挂 CLIENT，标记失效让用户主动重登
-                AUTH_EXPIRED = True
-                return
-            except Exception:
-                # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
-                # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登
-                AUTH_EXPIRED = False
-            global CLIENT, PROVIDER
-            CLIENT = c
-            PROVIDER = auth.get("provider", "139")
-            _apply_msisdn(auth.get("token", ""))
-            monitor.mark_logged_in()  # 恢复成功 → 允许调度器开始扫描
+            if auth and auth.get("token"):
+                token = auth["token"]
+        except Exception:
+            pass
+        if not token:
+            token = os.environ.get("CASGEN_TOKEN", "").strip()
+        if not token:
+            return
+        c = Yun139(token)
+        try:
+            c.list_dir("root")  # 轻量校验 token 是否仍有效
+            AUTH_EXPIRED = False
+        except TokenExpired:
+            # token 已过期：不挂 CLIENT，标记失效让用户主动重登
+            AUTH_EXPIRED = True
+            return
+        except Exception:
+            # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
+            # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登
+            AUTH_EXPIRED = False
+        global CLIENT, PROVIDER
+        CLIENT = c
+        PROVIDER = "139"
+        _apply_msisdn(token)
+        monitor.mark_logged_in()  # 恢复成功 → 允许调度器开始扫描
+        # 顺手把 token 落盘（网页端刷新后也能识别已登录；HF 上易失，但本地/飞牛持久化）
+        try:
+            _save_auth(token, "139")
         except Exception:
             pass
 
