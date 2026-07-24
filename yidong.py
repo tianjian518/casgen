@@ -122,7 +122,7 @@ class Yun139:
         # 公共请求头（大小写无所谓，值是关键）
         self.common_headers = {
             "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json;charset=UTF-8",
+            "Content-Type": "application/json",
             "Authorization": "Basic " + self.token,
             "Cms-Device": "default",
             "Mcloud-Channel": "1000101",
@@ -540,13 +540,39 @@ class Yun139:
         h["x-ExpRoute-Code"] = "routeCode=%s,type=2" % self.account
         return h
 
+    # align guangyapan OpenList drivers/139/personalPartInfos:
+    # 139 /file/create limits part count; default 100MB part; >30GB uses 512MB.
+    def get_part_size(self, size):
+        if size > 30 * 1024 * 1024 * 1024:
+            return 512 * 1024 * 1024
+        return 100 * 1024 * 1024
+
+    def part_infos(self, size):
+        """Align guangyapan personalPartInfos: multi-part infos each with
+        parallelHashCtx.partOffset. 139 rapid-upload restore requires this
+        structure, else some accounts get 04010319 (insufficient entitlement)."""
+        part_size = self.get_part_size(size)
+        part = 1
+        if size > part_size:
+            part = (size + part_size - 1) // part_size
+        infos = []
+        for i in range(part):
+            start = i * part_size
+            byte_size = min(size - start, part_size)
+            infos.append({
+                "partNumber": i + 1,
+                "partSize": byte_size,
+                "parallelHashCtx": {"partOffset": start},
+            })
+        return infos
+
     def restore(self, sha256, size, name, parent):
         body = {
             "contentHash": sha256,
             "contentHashAlgorithm": "SHA256",
             "contentType": "application/octet-stream",
             "parallelUpload": False,
-            "partInfos": [{"partNumber": 1, "partSize": size}],
+            "partInfos": self.part_infos(size),
             "size": size,
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": name,
