@@ -546,7 +546,7 @@ class Yun139:
             "contentHashAlgorithm": "SHA256",
             "contentType": "application/octet-stream",
             "parallelUpload": False,
-            "partInfos": [{"partNumber": 1, "partSize": size, "parallelHashCtx": sha256}],
+            "partInfos": [{"partNumber": 1, "partSize": size}],
             "size": size,
             "parentFileId": parent if parent not in ("root", "/", "") else "/",
             "name": name,
