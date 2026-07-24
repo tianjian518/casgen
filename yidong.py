@@ -838,28 +838,48 @@ class Yun139:
             if not cursor:
                 break
 
-    def generate_strm(self, root, public_url, path_prefix="", clean_old=False):
+    def generate_strm(self, root, public_url, path_prefix="", clean_old=False, progress_cb=None):
         """遍历 root 下所有 .cas，为每个生成同名 .strm（内容指向 casgen 网关 URL），上传到同目录。
-        public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外可达地址）。"""
+        public_url 即 CASGEN_PUBLIC_URL（casgen 网关对外可址）。
+        progress_cb(dict): 可选进度回调，用于前端实时显示进度，dict 含 phase/scanned/cas_found/done/total/name 等。"""
         public_url = (public_url or "").rstrip("/")
-        # 路径完整性校验：root 非根目录时必须提供 path_prefix（从云盘根到所选目录的完整路径），
-        # 否则生成的 .strm 链接会缺失上层目录，播放网关从云盘根解析将失败、无法播放。
         if root not in ("root", "/", "") and not path_prefix:
             raise Exception("无法获取完整目录路径（path_prefix 为空）。请在首页重新点「✔ 选定此文件夹」后再生成 .strm。")
         if not public_url:
             raise Exception("未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm")
+
+        def _report(**kw):
+            if progress_cb:
+                try:
+                    progress_cb(kw)
+                except Exception:
+                    pass
+
+        # ---------- 阶段一：扫描目录树，收集所有 .cas 条目（不上传，仅统计） ----------
+        cas_entries = []
+        scanned = 0
+        for rel, it in self.walk(root, path_prefix=path_prefix):
+            scanned += 1
+            if rel.lower().endswith(".cas"):
+                cas_entries.append((rel, it))
+            if scanned % 25 == 0:
+                _report(phase="scan", scanned=scanned, cas_found=len(cas_entries))
+        total = len(cas_entries)
+        _report(phase="scan", scanned=scanned, cas_found=total)
+        _report(phase="gen", done=0, total=total)
+
+        # ---------- 阶段二：逐个生成 .strm（上传，较慢，带进度） ----------
         results = []
         existing_cache = {}
-        for rel, it in self.walk(root, path_prefix=path_prefix):
+        for idx, (rel, it) in enumerate(cas_entries, 1):
             cleaned = False
-            if not rel.lower().endswith(".cas"):
-                continue
             cas_name = self._name(it)
             base = cas_name[:-4] if cas_name.endswith(".cas") else cas_name
             strm_name = base + ".strm"
             strm_url = "%s/cas/%s" % (public_url, rel)
             parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
-            # 已存在同名 .strm 则跳过，支持重复运行且避免 139 重复文件报错
+            if progress_cb:
+                _report(phase="gen", done=idx - 1, total=total, name=strm_name)
             cache = existing_cache.get(parent)
             if cache is None:
                 try:
@@ -868,7 +888,6 @@ class Yun139:
                 except Exception:
                     cache = set()
                 existing_cache[parent] = cache
-            # 旧 .strm 处理：clean_old=True 时先删除同名旧的再重写；否则跳过以保留
             if strm_name in cache:
                 if clean_old:
                     old_fid = cache.pop(strm_name, None)
@@ -897,6 +916,7 @@ class Yun139:
                 })
             except Exception as e:
                 results.append({"name": strm_name, "status": "failed", "error": str(e)})
+        _report(phase="done", done=total, total=total)
         return results
 
     # ======================== [4.0] L1 本地正则重命名 ========================

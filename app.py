@@ -97,6 +97,69 @@ def _load_auth():
     return None
 
 
+# ============================ Strm 生成后台任务 + 进度轮询 ============================
+# 生成 .strm 要遍历整个云盘目录树并逐个上传，耗时很长；改为后台线程执行，
+# 前端通过 /api/strm_progress?task=<id> 轮询实时进度（进度条 + 计数器 + 当前文件名）。
+import uuid as _uuid
+
+_STRM_TASKS = {}
+_STRM_LOCK = threading.Lock()
+
+
+def _new_strm_task():
+    tid = _uuid.uuid4().hex
+    # 限制内存占用：超过 64 个任务时清理已完成的旧任务
+    with _STRM_LOCK:
+        if len(_STRM_TASKS) > 64:
+            finished = [k for k, v in _STRM_TASKS.items() if v.get("finished")]
+            for k in finished[: max(0, len(_STRM_TASKS) - 64)]:
+                _STRM_TASKS.pop(k, None)
+    return tid
+
+
+def _strm_progress_cb(task_id):
+    """把 generate_strm 的进度回调合并进任务存储。"""
+    def cb(pr):
+        with _STRM_LOCK:
+            t = _STRM_TASKS.get(task_id)
+            if not t:
+                return
+            for k in ("phase", "scanned", "cas_found", "done", "total", "name"):
+                if k in pr:
+                    t[k] = pr[k]
+    return cb
+
+
+def _run_strm_task(task_id, root, public_url, root_path, clean_old):
+    try:
+        results = CLIENT.generate_strm(root, public_url, path_prefix=root_path,
+                                       clean_old=clean_old, progress_cb=_strm_progress_cb(task_id))
+        created = skipped = failed = cleaned = 0
+        for r in results:
+            s = r.get("status")
+            if s in ("uploaded", "recreated"):
+                created += 1
+                if s == "recreated":
+                    cleaned += 1
+            elif s == "skipped_existing":
+                skipped += 1
+            elif s in ("failed", "clean_failed"):
+                failed += 1
+        with _STRM_LOCK:
+            t = _STRM_TASKS.get(task_id)
+            if t:
+                t.update({"finished": True, "phase": "done", "created": created,
+                          "skipped": skipped, "failed": failed, "cleaned": cleaned,
+                          "results": results, "error": None})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        with _STRM_LOCK:
+            t = _STRM_TASKS.get(task_id)
+            if t:
+                t.update({"finished": True, "phase": "error", "error": str(e)})
+
+
 class H(BaseHTTPRequestHandler):
     def handle(self):
         """记录请求开始时间，供 log_request 计算耗时。"""
@@ -196,6 +259,18 @@ class H(BaseHTTPRequestHandler):
                     "webdav": "/dav/" if webdav.is_enabled() else None,
                 },
             })
+        elif self.path.startswith("/api/strm_progress"):
+            # Strm 生成进度轮询：/api/strm_progress?task=<id>
+            qs = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(qs)
+            task_id = (params.get("task") or [""])[0]
+            with _STRM_LOCK:
+                t = _STRM_TASKS.get(task_id)
+                if t is None:
+                    self._json({"ok": False, "error": "任务不存在或已过期，请重新生成"}, 404)
+                    return
+                snap = dict(t)
+            self._json({"ok": True, **snap})
         else:
             self._json({"error": "not found", "hint": "试试 /api/health 或 /api/version"}, 404)
 
@@ -405,14 +480,25 @@ class H(BaseHTTPRequestHandler):
             # 旧 .strm 自动清理：勾选后删除同名旧 .strm 再重新生成（v5.0）
             clean_old = bool(p.get("clean_old", False))
             public_url = (p.get("publicUrl") or os.environ.get("CASGEN_PUBLIC_URL", "")).strip()
-            try:
-                results = CLIENT.generate_strm(root, public_url, path_prefix=root_path, clean_old=clean_old)
-                ok_n = sum(1 for r in results if r.get("status") == "uploaded")
-                return self._json({"ok": True, "count": len(results),
-                                   "uploaded": ok_n, "results": results,
-                                   "publicUrl": public_url})
-            except Exception as e:
-                return self._json({"ok": False, "error": str(e)}, 400)
+            # 路径完整性兜底校验（前端也会校验）：非根目录必须带完整 path_prefix
+            if root not in ("root", "/", "") and not root_path:
+                return self._json({"ok": False,
+                    "error": "无法获取完整目录路径（path_prefix 为空）。请在首页重新点「✔ 选定此文件夹」后再生成 .strm。"}, 400)
+            if not public_url:
+                return self._json({"ok": False,
+                    "error": "未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm"}, 400)
+            # 后台线程执行（遍历+上传很慢），返回 task id，前端轮询 /api/strm_progress 获取进度
+            task_id = _new_strm_task()
+            with _STRM_LOCK:
+                _STRM_TASKS[task_id] = {"phase": "scan", "scanned": 0, "cas_found": 0,
+                                        "done": 0, "total": 0, "name": "",
+                                        "created": 0, "skipped": 0, "failed": 0, "cleaned": 0,
+                                        "publicUrl": public_url, "error": None,
+                                        "finished": False, "results": []}
+            threading.Thread(target=_run_strm_task,
+                             args=(task_id, root, public_url, root_path, clean_old),
+                             daemon=True).start()
+            return self._json({"ok": True, "task": task_id, "version": VERSION})
 
         # ---------- [4.0] L1 本地正则重命名 ----------
         if action == "rename_l1":
