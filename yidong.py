@@ -866,6 +866,9 @@ class Yun139:
                     cas_entries.append((rel, it))
                 if scanned % 25 == 0:
                     _report(phase="scan", scanned=scanned, cas_found=len(cas_entries))
+        except TokenExpired:
+            # 令牌在扫描阶段就过期：直接抛出，\u7531调用方提示重新登录
+            raise
         except Exception as e:
             # 遍历中途某个目录异常（个别目录报错 / 令牌过期）：记录后继续用已收集条目，
             # 不让整个任务中断，否则一个坏目录会导致全部 .strm 都没生成。
@@ -922,6 +925,9 @@ class Yun139:
                     "url": strm_url,
                     "error": up.get("_upload_error") or up.get("_complete_error"),
                 })
+            except TokenExpired:
+                # 生成阶段令牌过期：重抛出，\u8ba9调用方提示重新登录
+                raise
             except Exception as e:
                 results.append({"name": strm_name, "status": "failed", "error": str(e)})
         # 遍历阶段若曾中断（个别目录异常 / 令牌过期），把被跳过的目录记入结果，便于用户感知
