@@ -391,41 +391,27 @@ def _send_empty(handler, code):
 # .strm 特殊处理
 # =============================================================================
 def _is_own_cas_url(url):
-    """判断 URL 是否指向自己的 /cas/ 网关。"""
+    """判断 URL 是否指向自己的 /cas/ 网关。
+
+    改为按「路径含 /cas/」识别，不再强依赖 CASGEN_PUBLIC_URL 与生成 .strm 时的
+    主机完全一致——否则当 .strm 写的是 localhost、而播放器用 LAN IP 访问 casgen 时，
+    会被误判为外部 URL 而 302 到一个播放器连不到的地址，网曝米花直接报
+    「网络错误 / WebDAV 地址错误」。
+    """
     url = url.strip()
-    public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip().rstrip("/")
-
-    if url.startswith("http://") or url.startswith("https://"):
-        if public_url and url.startswith(public_url + "/cas/"):
-            return True
-        # 额外匹配本地常见地址（播放器和 casgen 同机时）
-        for prefix in ("http://127.0.0.1", "http://localhost", "http://0.0.0.0"):
-            if url.startswith(prefix) and "/cas/" in url:
-                return True
-        return False
-
     if url.startswith("/cas/"):
+        return True
+    if "://" in url and "/cas/" in url:
         return True
     return False
 
 
 def _extract_cas_path(url):
-    """从自己的 /cas/ URL 中提取 .cas 相对路径。"""
+    """从自己的 /cas/ URL 中提取 .cas 相对路径（按 /cas/ 位置截取，忽略主机）。"""
     url = url.strip()
-    public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip().rstrip("/")
-
-    if public_url and url.startswith(public_url + "/cas/"):
-        return url[len(public_url) + len("/cas/"):]
-
-    if url.startswith("/cas/"):
-        return url[len("/cas/"):]
-
-    for prefix in ("http://127.0.0.1", "http://localhost", "http://0.0.0.0"):
-        if url.startswith(prefix):
-            idx = url.find("/cas/")
-            if idx >= 0:
-                return url[idx + len("/cas/"):]
-
+    idx = url.find("/cas/")
+    if idx >= 0:
+        return url[idx + len("/cas/"):]
     return ""
 
 
@@ -476,9 +462,8 @@ def _proxy_stream(handler, url, schedule_cleanup_fn=None, temp_fid=None):
         cl = resp.headers.get("Content-Length")
         if cl is not None:
             handler.send_header("Content-Length", cl)
-        ar = resp.headers.get("Accept-Ranges")
-        if ar:
-            handler.send_header("Accept-Ranges", ar)
+        # 始终声明支持 Range（即便 139 没返回该头），便于网曝米花拖拽进度
+        handler.send_header("Accept-Ranges", "bytes")
         cr = resp.headers.get("Content-Range")
         if cr:
             handler.send_header("Content-Range", cr)

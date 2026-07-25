@@ -169,6 +169,10 @@ def _run_strm_task(task_id, root, public_url, root_path, clean_old):
 
 
 class H(BaseHTTPRequestHandler):
+    # WebDAV/流式转发用 HTTP/1.1：支持 keep-alive 与标准 Range 流式，
+    # 避免 HTTP/1.0 下网曝米花等播放器报「网络错误 / WebDAV 错误」。
+    protocol_version = "HTTP/1.1"
+
     def handle(self):
         """记录请求开始时间，供 log_request 计算耗时。"""
         self._t0 = time.monotonic()
