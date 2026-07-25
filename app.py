@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from yidong import Yun139, TokenExpired, __version__ as VERSION
 from share139 import (parse_share_input, get_share_info, list_all_share_files,
-                      save_share_files, ShareError)
+                      list_share_root_items, save_share_files, ShareError)
 import monitor
 import monitor_store
 import rename
