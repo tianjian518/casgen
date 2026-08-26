@@ -16,8 +16,8 @@
 import time
 import threading
 
-from share139 import (list_all_share_files, save_share_files,
-                       ShareError, parse_share_input)
+from share139 import (list_all_share_files, get_share_info, save_share_files,
+                      transfer_share_files, ShareError, parse_share_input)
 from yidong import TokenExpired
 import monitor_store
 from monitor_store import MIN_INTERVAL
@@ -32,26 +32,6 @@ GEN_RETRY_WAIT = 30
 # ---- 与 app.py 解耦：通过 getter 读取实时登录态，避免循环 import ----
 _CLIENT_GETTER = None
 _EXPIRED_GETTER = None
-_PHONE = ""  # 手机号(msisdn)：139 转存接口必填，登录时由 app.py 注入
-_LOGGED_IN = False  # 是否已登录：调度器在首次登录成功前不扫描，避免后台 139 流量与登录抢资源
-
-
-def set_phone(phone):
-    """app.py 登录时把解码出的手机号(msisdn)注入，供 scan_one 转存使用。"""
-    global _PHONE
-    _PHONE = phone or ""
-
-
-def mark_logged_in():
-    """app.py 登录/恢复登录成功后调用：解除调度器扫描闸门。"""
-    global _LOGGED_IN
-    _LOGGED_IN = True
-
-
-def reset_login():
-    """登录失效/退出时调用：再次暂停后台扫描。"""
-    global _LOGGED_IN
-    _LOGGED_IN = False
 
 
 def bind(app_module):
@@ -79,8 +59,14 @@ def _summary(added, total):
     return "%s 扫描：无新增（共 %d）" % (_now(), total)
 
 
-def scan_one(monitor):
-    """扫描单个监控项一次，返回结果 dict。"""
+def scan_one(monitor, on_phase=None):
+    """扫描单个监控项一次，返回结果 dict。on_phase(阶段名, 信息dict) 可选，用于分步提示。"""
+    def _phase(ph, **kw):
+        if callable(on_phase):
+            try:
+                on_phase(ph, kw)
+            except Exception:
+                pass
     client = _client()
     if client is None:
         return {"status": "no_client", "msg": "尚未登录"}
@@ -89,13 +75,17 @@ def scan_one(monitor):
         return {"status": "paused", "msg": "登录已失效，暂停监控"}
 
     # 1) 解析目标目录
+    _phase("解析目标目录")
     try:
         target_catalog = client.resolve_folder(monitor["target"])
     except TokenExpired:
         monitor_store.update(monitor["id"], status="paused")
         return {"status": "paused", "msg": "登录已失效，暂停监控"}
+    except Exception as e:
+        return {"status": "error", "msg": f"目录解析失败: {str(e)}"}
 
     # 2) 列举分享当前文件
+    _phase("列举分享文件")
     try:
         files = list_all_share_files(monitor["link_id"], monitor["pwd"], token=client.token)
     except ShareError as e:
@@ -110,18 +100,22 @@ def scan_one(monitor):
         return {"status": "paused", "msg": "登录已失效"}
 
     # 3) 差异检测：本次集合 - 上次集合 = 新增
+    _phase("差异检测")
     cur_ids = {f["contentID"] for f in files}
     prev = set(monitor.get("last_files") or [])
     new_files = [f for f in files if f["contentID"] not in prev]
 
     added = 0
+    last_err = ""  # 关键修复：auto_cas 关闭或无可转存新文件时该变量不会被赋值，必须在顶部初始化，否则末尾回写基线时 UnboundLocalError 导致扫描直接 500
     if new_files:
-        co_paths = [f["path"] for f in new_files]
+        _phase("转存新增", added=len(new_files))
         try:
-            save_share_files(monitor["link_id"], co_paths, [], target_catalog,
-                             need_password=bool(monitor["pwd"]), phone=_PHONE,
-                             token=client.token)
-            added = len(new_files)
+            flat = not monitor.get("preserve_structure", True)
+            added = transfer_share_files(
+                monitor["link_id"], monitor["pwd"], client.token,
+                getattr(client, "account", ""), new_files, target_catalog,
+                make_folder=lambda pid, nm: client.find_or_create_folder(nm, pid),
+                flat=flat)
         except ShareError as e:
             if e.fatal:
                 monitor_store.update(monitor["id"], status="invalid",
@@ -135,9 +129,11 @@ def scan_one(monitor):
 
         # 4) 索引延迟 + 生成 CAS（重试）
         if monitor["auto_cas"]:
+            _phase("等待索引")
             time.sleep(INDEX_WAIT)
             last_err = ""
             for attempt in range(GEN_RETRY):
+                _phase("生成 CAS" if attempt == 0 else "生成 CAS（重试 %d）" % (attempt + 1))
                 try:
                     client.generate(target_catalog, delete_source=monitor["delete_source"])
                     last_err = ""
@@ -153,23 +149,36 @@ def scan_one(monitor):
                 monitor_store.update(monitor["id"], status="error",
                                      last_result="生成CAS失败：" + last_err)
 
-    # 5) 回写基线（无论有无新增都更新，保持 last_scan 新鲜）
+    # 5) 回写基线（已转存的文件必须并入基线，避免下次重复转存；
+    #    但 CAS 生成失败时不要掩盖错误状态——generate 是全目录幂等重算，
+    #    下次扫描会对这些文件重试 CAS，无需把它们移出基线）
     monitor_store.update(monitor["id"], last_files=list(cur_ids), last_scan=_now(),
-                         status="ok", last_result=_summary(added, len(files)))
-    return {"status": "ok", "added": added, "total": len(files)}
+                         status=("error" if last_err else "ok"),
+                         last_result=(("生成CAS失败：" + last_err) if last_err else _summary(added, len(files))))
+    _phase("完成", added=added)
+    return {"status": ("error" if last_err else "ok"), "added": added, "total": len(files)}
 
 
-def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval):
+def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, preserve_structure=True):
     """添加监控项，并立即拉一次链接建立文件基线（last_files）。"""
     mon = monitor_store.add({
         "link_id": link_id, "pwd": pwd, "target": target,
-        "auto_cas": auto_cas, "delete_source": delete_source, "interval_min": interval,
+        "auto_cas": auto_cas, "delete_source": delete_source,
+        "interval_min": interval, "preserve_structure": preserve_structure,
     })
     client = _client()
     if client is not None and not _expired():
         try:
             files = list_all_share_files(link_id, pwd, token=client.token)
+            link_name = ""
+            try:
+                sinfo = get_share_info(link_id, pwd, "root", 1, 1,
+                                       getattr(client, "account", ""), client.token)
+                link_name = (sinfo or {}).get("lkName") or ""
+            except Exception:
+                pass
             monitor_store.update(mon["id"], last_files=[f["contentID"] for f in files],
+                                 link_name=link_name,
                                  last_scan=_now(), status="ok",
                                  last_result="已添加，基线 %d 个视频" % len(files))
             mon = monitor_store.get(mon["id"])
@@ -187,8 +196,6 @@ class MonitorScheduler(threading.Thread):
     def run(self):
         while not self._stop.is_set():
             time.sleep(60)
-            if not _LOGGED_IN:
-                continue  # 尚未登录：不扫描，避免后台 139 流量与登录抢资源
             if _expired():
                 continue  # 全局登录失效：暂停所有监控
             now = time.time()
@@ -229,17 +236,3 @@ def start_scheduler():
     if _scheduler is None or not _scheduler.is_alive():
         _scheduler = MonitorScheduler()
         _scheduler.start()
-
-
-def stop_scheduler():
-    """优雅停止调度器（守护线程会自行退出）。供 SIGTERM/Ctrl+C 优雅停机用。"""
-    global _scheduler
-    if _scheduler is not None and _scheduler.is_alive():
-        try:
-            _scheduler.stop()
-        except Exception:
-            pass
-
-
-def is_scheduler_running():
-    return _scheduler is not None and _scheduler.is_alive()

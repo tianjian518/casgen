@@ -3,18 +3,44 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>移动云盘 · 影视文件 CAS 瘦身工具</title>
+<title>网盘影视 转 CAS 瘦身工具 v5.0</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 880px; margin: 0 auto; padding: 16px; background:#f6f7fb; color:#222; }
-  h1 { font-size: 22px; }
-  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:16px; margin:12px 0; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; max-width: 1000px; margin: 0 auto; padding: 16px; background:linear-gradient(180deg,#f8fafc 0%,#eef2f8 100%); min-height:100vh; color:#222; }
+  h1 {
+    font-size: 26px;
+    margin: 18px 0 6px;
+    background: linear-gradient(90deg, #2563eb, #7c3aed, #db2777);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .ver-badge {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(90deg, #7c3aed, #db2777);
+    padding: 2px 10px;
+    border-radius: 999px;
+    vertical-align: middle;
+    -webkit-text-fill-color: #fff;
+    box-shadow: 0 2px 6px rgba(124,58,237,0.35);
+  }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:18px; margin:12px 0; box-shadow:0 1px 3px rgba(15,23,42,0.06); transition:box-shadow .2s ease, transform .2s ease; }
+  .card:hover { box-shadow:0 6px 22px rgba(37,99,235,0.10); }
   label { display:block; margin:8px 0 4px; font-weight:600; }
+  .card h3 { font-size:16px; margin:0 0 12px; padding-left:10px; border-left:4px solid; border-image:linear-gradient(180deg,#2563eb,#7c3aed) 1; color:#1f2937; }
   textarea, input[type=text] { width:100%; padding:8px; border:1px solid #ccc; border-radius:6px; font-size:13px; }
   button { background:#2563eb; color:#fff; border:0; border-radius:6px; padding:9px 14px; font-size:14px; cursor:pointer; margin-top:8px; }
-  button.sec { background:#6b7280; }
+  button.sec { background:linear-gradient(90deg,#7c3aed,#2563eb); color:#fff; box-shadow:0 2px 6px rgba(37,99,235,0.3); }
   button.danger { background:#dc2626; }
   button:disabled { background:#9ca3af; cursor:not-allowed; }
+  button:hover:not(:disabled) { filter:brightness(1.06); transform:translateY(-1px); }
+  button.sec:hover:not(:disabled) { filter:brightness(1.08); }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .folder { display:inline-block; background:#eef2ff; border:1px solid #c7d2fe; border-radius:6px; padding:6px 10px; margin:4px; cursor:pointer; }
   .folder:hover { background:#dbeafe; }
@@ -25,143 +51,499 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th,td { border:1px solid #e5e7eb; padding:6px; text-align:left; }
 
-  /* 顶部导航栏（常驻，所有页面共用） */
-  .topnav { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid #e5e7eb; margin:-16px -16px 14px; padding:10px 16px; display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
-  .topnav .brand { font-weight:700; font-size:15px; margin-right:8px; white-space:nowrap; }
-  .topnav a { text-decoration:none; color:#374151; padding:6px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
-  .topnav a:hover { background:#eef2ff; }
-  .topnav a.active { background:#2563eb; color:#fff; }
-  .topnav .navspacer { margin-left:auto; }
-  .navfolder { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:8px 12px; margin:0 0 12px; font-size:13px; }
-  .navfolder b { color:#15803d; }
-  /* 首页品牌标题：彩色渐进 + 版本胶囊 */
-  .brand-title { font-size: 26px; font-weight: 800; margin: 4px 0 10px; line-height: 1.2;
-    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 50%, #ec4899 100%);
-    -webkit-background-clip: text; background-clip: text;
-    -webkit-text-fill-color: transparent; color: transparent; display: inline-block; }
-  .ver-chip { display:inline-block; vertical-align: middle; margin-left:10px;
-    background: #f3f4f6; border:1px solid #e5e7eb; color:#374151;
-    -webkit-text-fill-color:#374151;
-    font-size:13px; font-weight:600; padding:3px 10px; border-radius:999px; }
-  .selected-info { background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:10px 14px; margin:12px 0; font-size:13px; }
+  .topbar{ position:sticky; top:0; z-index:40; background:#fff; border:1px solid #e5e7eb;
+           border-radius:10px; padding:10px 14px; margin:12px 0; display:flex; flex-direction:column;
+           align-items:stretch; gap:10px; box-shadow:0 1px 4px rgba(0,0,0,0.04); }
+  .topbar-title{ font-weight:800; font-size:25px; line-height:1.3; background:linear-gradient(90deg,#2563eb,#7c3aed,#db2777);
+          -webkit-background-clip:text; background-clip:text; color:transparent; white-space:nowrap; letter-spacing:.5px; }
+  .topbar-nav .tab:hover { background:#e0e7ff; }
+  .topbar-nav{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .tabs{ display:flex; gap:6px; flex-wrap:wrap; }
+  .tab{ background:#eef2ff; color:#374151; border:0; border-radius:999px; padding:7px 14px;
+        font-size:13px; font-weight:600; cursor:pointer; margin:0; }
+  .tab.active{ background:linear-gradient(90deg,#2563eb,#7c3aed); color:#fff; }
+  .tabpane{ display:none; }
+  .tabpane.active{ display:block; }
+
+  .login-status{ margin-left:auto; font-size:13px; color:#6b7280; white-space:nowrap; }
+  .login-status a{ color:#2563eb; cursor:pointer; text-decoration:none; }
+  .login-status a:hover{ text-decoration:underline; }
 </style>
 </head>
 <body>
-<nav class="topnav">
-  <span class="brand">🎬 CAS瘦身</span>
-  <a href="index.html" class="active">🏠 首页</a>
-  <a href="convert.html">🔄 转换CAS</a>
-  <a href="restore.html">▶️ 恢复</a>
-  <a href="share.html">📥 分享</a>
-  <a href="strm.html">🎞️ Strm</a>
-  <a href="rename.html">✏️ 重命名</a>
-  <span class="navspacer"></span>
-</nav>
-
-<h1 class="brand-title">移动云盘 · 影视文件 CAS 瘦身工具 <span class="ver-chip" id="ver">v4.9</span></h1>
-<p class="muted">把网盘原视频"零流量"变成几 KB 的 .cas 文件，配合 OpenList / 网易爆米花 / 飞牛影视直接播放。</p>
-
-<!-- 使用三步 -->
-<div class="card">
-  <h3>📖 使用三步</h3>
-  <ol class="muted" style="line-height:1.9; margin:8px 0 0; padding-left:22px;">
-    <li>浏览器登录 139 云盘 → F12 抓包复制 <code>Authorization</code> 头 → 下面粘贴 → 点「登录」</li>
-    <li>展开目录选好目标文件夹 → 用顶部导航去「🔄 转换CAS」或「📥 分享」一键处理</li>
-    <li>用 <a href="https://github.com/OpenListTeam/OpenList/releases" target="_blank" style="color:#2563eb">光鸭版 OpenList</a> / <b>网易爆米花</b> / <b>飞牛影视</b> 挂载云盘，点 <code>.cas</code> 文件直接零流量播放</li>
-  </ol>
+<div id="authBanner" style="display:none; background:#dc2626; color:#fff; padding:12px 16px; border-radius:8px; margin:12px 0; position:sticky; top:0; z-index:50;">
+  ⚠️ 登录已失效，请重新登录（在上方重新粘贴 Authorization 并点登录）。
+  <button id="bannerLoginBtn" style="background:#fff;color:#dc2626;border:0;border-radius:6px;padding:6px 12px;margin-left:10px;cursor:pointer;">去登录</button>
 </div>
+<header class="topbar">
+  <div class="topbar-title">🎬 移动云盘影视资源转CAS瘦身工具 <span class="ver-badge" id="ver">v5.0</span></div>
+  <div class="topbar-nav">
+    <nav class="tabs">
+      <button class="tab active" id="tabbtn-local" onclick="showTab('local')">我的云盘</button>
+      <button class="tab" id="tabbtn-share" onclick="showTab('share')">分享一条龙</button>
+      <button class="tab" id="tabbtn-monitor" onclick="showTab('monitor')">链接监控</button>
+      <button class="tab" id="tabbtn-tools" onclick="showTab('tools')">工具箱</button>
+    </nav>
+    <span id="loginStatus" class="login-status"></span>
+  </div>
+</header>
+<p class="muted">把网盘里已有的原视频"零流量"变成几 KB 的 .cas 文件（删掉原视频腾空间，播放时从 .cas 临时恢复）。全部用鼠标操作。</p>
 
-<!-- WebDAV 挂载 -->
-<div class="card" id="webdavCard" style="display:none">
-  <h3>📡 WebDAV 挂载（播放器直挂 .strm）</h3>
-  <p class="muted" style="margin:4px 0">把 139 云盘里的 <code>.strm</code> 文件通过 WebDAV 挂到网易爆米花、飞牛影视等播放器，播放时自动跳转 139 直链。</p>
-  <table style="font-size:13px; margin-top:8px;">
-    <tr><td style="width:100px; font-weight:600;">挂载地址</td><td><code id="webdavUrl">-</code></td></tr>
-    <tr><td style="font-weight:600;">用户名</td><td><code id="webdavUser">-</code></td></tr>
-    <tr><td style="font-weight:600;">密码</td><td><code id="webdavPass">-</code></td></tr>
-    <tr><td style="font-weight:600;">WebDAV 根目录</td><td><code id="webdavRoot">-</code></td></tr>
-  </table>
-  <p class="muted" style="margin-top:8px; font-size:12px;">
-    ⚠️ 需要在启动 casgen 时设置环境变量 <code>CASGEN_WEBDAV_USER</code> 和 <code>CASGEN_WEBDAV_PASS</code> 才会启用。
-  </p>
-</div>
-
-<!-- 登录 -->
-<div class="card">
-  <h3>第 1 步：登录云盘</h3>
+<!-- 步骤1：登录 -->
+<div class="card" id="loginCard">
+  <h3>选择网盘并登录</h3>
   <div class="row">
     <label><input type="radio" name="prov" value="139" checked> 移动云盘 (139)</label>
     <label><input type="radio" name="prov" value="189" disabled> 天翼云盘 (189) <span class="muted">（暂未完成）</span></label>
   </div>
-  <label>Authorization 头（从浏览器抓包复制）</label>
+  <label>Authorization 头（从浏览器抓包复制，见 README）</label>
   <textarea id="auth" rows="3" placeholder="Bearer xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></textarea>
   <button id="loginBtn">登录并加载根目录</button>
   <div id="loginMsg"></div>
 </div>
 
-<!-- 选文件夹 -->
+<!-- 步骤2：浏览目录 -->
 <div class="card" id="browseCard" style="display:none">
-  <h3>第 2 步：选择要处理的文件夹</h3>
+  <h3>选择要处理的文件夹</h3>
   <div class="crumb" id="crumb"></div>
   <div id="folders"></div>
   <div class="row">
-    <button id="useFolderBtn" class="sec">✔ 选定此文件夹</button>
+    <button id="useFolderBtn" class="sec">✔ 选定此文件夹用于转换</button>
     <span id="selFolderName" class="muted"></span>
   </div>
 </div>
 
-<!-- 已选文件夹提示 -->
-<div id="selectedInfo" class="selected-info" style="display:none">
-  ✅ 已选定：<b id="selInfoText"></b>
+<!-- 步骤3：分析 + 转换 -->
+<div class="card" id="opCard" style="display:none">
+  <h3>分析并转换</h3>
+  <div class="row">
+    <button id="planBtn">① 先分析（看看哪些能转）</button>
+    <button id="convertBtn" class="danger">② 开始转换（生成 .cas）</button>
+  </div>
+  <p class="muted">转换后，会在每个原视频<b>所在的文件夹</b>里生成一个同名 .cas 文件（几 KB，零流量）。原视频仍在云盘，删不删由你决定。<b>之后用光鸭版 OpenList 挂载这个云盘，就能直接点 .cas 播放。</b></p>
+  <label style="margin-top:10px"><input type="checkbox" id="delChk"> 生成后删除原视频（⚠️ 先不勾，确认 .cas 能恢复再勾）</label>
+  <div id="planMsg"></div>
+  <div id="convMsg"></div>
+</div>
+
+<!-- [2.0 新增] 分享链接一条龙 -->
+<div class="card" id="shareCard" style="display:none">
+  <h3>📥 分享链接一条龙（别人的 139 分享 → 转存到我的云盘）</h3>
+  <p class="muted">粘贴别人的 139 分享链接即可，提取码会自动从链接里识别，不用分开填。</p>
+  <label>分享链接（可连提取码一起粘贴）</label>
+  <textarea id="shareText" rows="3" placeholder="例如：https://yun.139.com/shareweb/#/w/i/2qidG1XEkUKi0 提取码:d78q"></textarea>
+  <label>转存到我云盘的目录（留空=根目录；可手动填路径，或点 📁 浏览选择已有目录）</label>
+  <div class="row">
+    <input type="text" id="shareTarget" placeholder="如：分享转存（留空则存到根目录）" style="flex:1">
+    <button type="button" id="shareBtn" class="sec">📁 浏览</button>
+  </div>
+  <div id="sharePicker" class="card" style="display:none; margin-top:8px; padding:12px;">
+    <div class="crumb" id="shareCrumb"></div>
+    <div id="shareFolders"></div>
+    <div class="row" style="margin-top:8px;">
+      <input type="text" id="shareNewName" placeholder="在当前目录下新建子目录" style="flex:1">
+      <button type="button" id="shareNewBtn" class="sec">➕ 新建</button>
+    </div>
+    <div class="row">
+      <button type="button" id="shareUse" class="sec">✔ 选定此目录</button>
+      <button type="button" id="shareCancel" class="sec">取消</button>
+      <span id="shareCur" class="muted"></span>
+    </div>
+  </div>
+  <div class="checks" style="margin:10px 0">
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareStruct" checked> 按分享目录结构分文件夹（每个影视剧单独子目录）</label>
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareAutoCas"> 转存后自动生成 CAS（一条龙，省一步）</label>
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareDeleteSrc"> 生成 CAS 后删除原视频（仅当同时勾选了"自动生成 CAS"才生效）</label>
+    <label style="display:block;margin:5px 0"><input type="checkbox" id="shareMonitor"> 转存后同时开启链接监控（每小时自动扫描新增剧集并转存）</label>
+  </div>
+  <div class="row">
+    <button id="shareParseBtn">① 解析并列出视频</button>
+    <button id="shareSaveBtn" class="sec">② 转存视频到我云盘</button>
+  </div>
+  <div id="shareMsg"></div>
+  <div id="shareCatalogs" class="muted"></div>
+  <table id="shareTable"><thead><tr><th>视频文件</th><th>大小</th><th>所在目录</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 3.0 分享链接定时监控 -->
+<div class="card" id="monitorCard" style="display:none">
+  <h3>📡 分享链接定时监控（剧集更新自动转存 + 生成 CAS）</h3>
+  <p class="muted">把别人的 139 分享链接挂在这里，系统按间隔自动检查，发现新文件就转存到目标目录并生成 CAS，方便追新。最短 60 分钟一次。</p>
+
+  <div style="border:1px solid #ccc;border-radius:8px;padding:12px;margin:8px 0">
+    <h4 style="margin:0 0 8px">➕ 直接添加监控链接</h4>
+    <p class="muted" style="margin:0 0 8px">适合已转存并生成过 CAS 的影视：添加时<b>只建立当前文件基线，不会重复转存/生成已有内容</b>，以后只有分享里新增的视频才会被自动转存并生成 CAS。</p>
+    <label>分享链接（可连提取码一起粘贴）</label>
+    <textarea id="monText" rows="2" placeholder="https://yun.139.com/shareweb/#/w/i/xxxx 提取码:xxxx"></textarea>
+    <label>转存到我云盘的目录（留空=根目录；可点 📁 浏览选择，或手填路径如 移动CAS/移动影视CAS/国漫，不存在会自动创建）</label>
+    <div class="row">
+      <input type="text" id="monTarget" placeholder="留空则存到根目录" style="flex:1">
+      <button type="button" id="monBtn" class="sec">📁 浏览</button>
+    </div>
+    <div id="monPicker" class="card" style="display:none;margin-top:8px;padding:12px;">
+      <div class="crumb" id="monCrumb"></div>
+      <div id="monFolders"></div>
+      <div class="row" style="margin-top:8px;">
+        <input type="text" id="monNewName" placeholder="在当前目录下新建子目录" style="flex:1">
+        <button type="button" id="monNewBtn" class="sec">➕ 新建</button>
+      </div>
+      <div class="row">
+        <button type="button" id="monUse" class="sec">✔ 选定此目录</button>
+        <button type="button" id="monCancel" class="sec">取消</button>
+        <span id="monCur" class="muted"></span>
+      </div>
+    </div>
+    <div class="checks" style="margin:10px 0">
+      <label style="display:block;margin:5px 0"><input type="checkbox" id="monStruct" checked> 按分享目录结构分文件夹（每个影视剧单独子目录）</label>
+      <label style="display:block;margin:5px 0"><input type="checkbox" id="monAutoCas" checked> 发现新剧集后自动生成 CAS</label>
+      <label style="display:block;margin:5px 0"><input type="checkbox" id="monDeleteSrc"> 生成 CAS 后删除原视频（仅当勾选了"自动生成 CAS"才生效）</label>
+      <label style="display:block;margin:5px 0">扫描间隔（分钟，最短 60）：<input type="number" id="monInterval" value="60" min="60" style="width:80px"></label>
+    </div>
+    <div class="row">
+      <button id="monAddBtn">➕ 添加监控</button>
+      <span id="monAddMsg" class="msg"></span>
+    </div>
+  </div>
+
+  <p class="muted">已添加的监控（状态 / 立即扫描 / 删除）：</p>
+  <div id="monitorScanMsg" class="msg" style="min-height:1.4em;margin:6px 0"></div>
+  <table id="monTable"><thead><tr><th>剧名</th><th>分享</th><th>目标目录</th><th>间隔</th><th>状态</th><th>上次扫描</th><th>结果</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- 步骤4：恢复播放 -->
+<div class="card" id="restoreCard" style="display:none">
+  <h3>从 .cas 恢复播放</h3>
+  <p class="muted">下面是你刚转换出来的记录，点"恢复"会在网盘里重新生成原视频。</p>
+  <table id="recTable"><thead><tr><th>文件名</th><th>大小</th><th>操作</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- [4.0] 生成 Strm 文件（播放直链） -->
+<div class="card" id="strmCard" style="display:none">
+  <h3>生成 Strm 文件（播放直链）</h3>
+  <p class="muted">.cas 是瘦身文件，播放器读不懂。这里为每个 .cas 在<b>同目录</b>生成一个同名 .strm（里面是一行 casgen 网关地址）。把 .strm 挂到网易爆米花 / 飞牛影视，即可直连 139 播放，无需 OpenList。</p>
+  <label>casgen 网关对外地址（播放器能访问到的 http://IP:端口，如 http://192.168.1.100:5000）</label>
+  <input type="text" id="casgenPublicUrl" placeholder="http://你的IP:5000">
+  <div class="row">
+    <button type="button" id="strmToolsBtn" class="sec">📁 浏览选择目录</button>
+    <span id="strmToolsCur" class="muted">尚未选择目录（将用「我的云盘」里已选定的目录）</span>
+  </div>
+  <div id="strmToolsPicker" class="card" style="display:none; margin-top:8px; padding:12px;">
+    <div class="crumb" id="strmToolsCrumb"></div>
+    <div id="strmToolsFolders"></div>
+    <div class="row">
+      <input type="text" id="strmToolsNewName" placeholder="在当前目录下新建子目录" style="flex:1">
+      <button type="button" id="strmToolsNewBtn" class="sec">➕ 新建</button>
+      <button type="button" id="strmToolsUse" class="sec">✔ 选定此目录</button>
+      <button type="button" id="strmToolsCancel" class="sec">取消</button>
+    </div>
+    <span id="strmToolsHint" class="muted"></span>
+  </div>
+  <div class="row">
+    <button id="genStrmBtn">① 生成 Strm（当前所选目录）</button>
+  </div>
+  <p class="muted">会遍历所选文件夹下所有 .cas，逐个生成 .strm。.strm 内容形如：<code>http://IP:5000/cas/电影/流浪地球2.cas</code></p>
+  <div id="strmMsg"></div>
+  <table id="strmTable"><thead><tr><th>文件名</th><th>结果</th><th>直链</th></tr></thead><tbody></tbody></table>
+</div>
+
+<!-- [4.0] L1 本地正则重命名 -->
+<div class="card" id="renameCard" style="display:none">
+  <h3>L1 本地重命名（去水印 / 统一季集）</h3>
+  <p class="muted">零联网、零依赖，只改 <b>.cas 的显示名</b>（不影响恢复播放）。把当前文件夹下所有 .cas 整理成标准名：去发布组/网站水印，统一「第X集→E01」「1x01→S01E01」。建议先<b>预览</b>确认，再<b>执行</b>。</p>
+  <div class="row">
+    <button type="button" id="renameToolsBtn" class="sec">📁 浏览选择目录</button>
+    <span id="renameToolsCur" class="muted">尚未选择目录（将用「我的云盘」里已选定的目录）</span>
+  </div>
+  <div id="renameToolsPicker" class="card" style="display:none; margin-top:8px; padding:12px;">
+    <div class="crumb" id="renameToolsCrumb"></div>
+    <div id="renameToolsFolders"></div>
+    <div class="row">
+      <input type="text" id="renameToolsNewName" placeholder="在当前目录下新建子目录" style="flex:1">
+      <button type="button" id="renameToolsNewBtn" class="sec">➕ 新建</button>
+      <button type="button" id="renameToolsUse" class="sec">✔ 选定此目录</button>
+      <button type="button" id="renameToolsCancel" class="sec">取消</button>
+    </div>
+    <span id="renameToolsHint" class="muted"></span>
+  </div>
+  <div class="row">
+    <button id="renamePreviewBtn">① 预览改名</button>
+    <button id="renameExecBtn" class="sec">② 执行改名</button>
+  </div>
+  <p class="muted">预览只显示「原名 → 新名」，不改云盘；执行才真正改 139 上的文件名。</p>
+  <div id="renameMsg"></div>
+  <table id="renameTable"><thead><tr><th>原名</th><th></th><th>新名</th><th>结果</th></tr></thead><tbody></tbody></table>
 </div>
 
 <!-- 调试区 -->
-<div class="card">
+<div class="card" id="debugCard">
   <details>
     <summary>🛠 原始接口返回（出错时把这里的内容发给我调试）</summary>
     <pre id="debug">（空）</pre>
   </details>
 </div>
 
-<script src="utils.js"></script>
+<main id="panes">
+  <section class="tabpane active" id="pane-local"></section>
+  <section class="tabpane" id="pane-share"></section>
+  <section class="tabpane" id="pane-monitor"></section>
+  <section class="tabpane" id="pane-tools"></section>
+</main>
 <script>
-let state = { currentParent: "root", selectedRoot: "root", selectedName: "", path: [["root","根目录"]] };
+let state = { currentParent: "root", selectedRoot: "root", selectedName: "", path: [["root","根目录"]], strmRoot:"", strmName:"", renameRoot:"", renameName:"" };
+const TAB_MAP = {
+  local:   ["browseCard","opCard","restoreCard"],
+  share:   ["shareCard"],
+  monitor: ["monitorCard"],
+  tools:   ["strmCard","renameCard","debugCard"],
+};
+function buildTabs(){
+  for (const tab in TAB_MAP){
+    const pane = document.getElementById("pane-"+tab);
+    if(!pane) continue;
+    TAB_MAP[tab].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el){ el.style.display=""; pane.appendChild(el); }
+    });
+  }
+}
+function showTab(tab){
+  document.querySelectorAll(".tabpane").forEach(p=>p.classList.remove("active"));
+  document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
+  const pane=document.getElementById("pane-"+tab); if(pane) pane.classList.add("active");
+  const btn=document.getElementById("tabbtn-"+tab); if(btn) btn.classList.add("active");
+  window.__curTab=tab;
+  if(tab==="monitor" && typeof loadMonitors==="function") loadMonitors();
+}
+buildTabs(); showTab("local");
 
-// ========== 登录 ==========
+
+// [3.0 模块一] 登录态失效检测：页面加载即查 + 每 60s 轮询；失效则弹横幅提示重登
+async function checkAuth(){
+  try{
+    const d = await api({action:"login_status"});
+    if(d && d.expired){ showAuthBanner(); return; }  // 登录已失效，提示重登，不展开
+    if(d && d.loggedIn){
+      hideAuthBanner();
+      expandWorkspace();
+      return;
+    }
+    // 后端无登录态（进程重启 / 未持久化等）：主动用浏览器本地缓存的 token 自动重登，
+    // 覆盖「刷新页面 / 重启服务」后仍保持登录，不依赖页面 load 事件时机。
+    const saved = readLocal("casgen_auth");
+    if(saved){
+      const prov = readLocal("casgen_prov") || "139";
+      const r = await api({ action:"login", provider:prov, authorization:saved });
+      dbg(r);
+      if(r && r.ok){
+        hideAuthBanner();
+        expandWorkspace(r);
+        return;
+      }
+    }
+    hideAuthBanner();
+  }catch(e){ /* 网络异常不干扰页面 */ }
+}
+function readLocal(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function expandWorkspace(d){
+  onLoggedIn(d && d.provider);
+  showAppCards();
+  showTab(window.__curTab || "local");
+  // 监控功能后端有实现但前端未完整接线：loadMonitors 未必存在，加 typeof 守卫，
+  // 避免因未定义函数抛错而中断本函数（之前会导致刷新页面后根目录不渲染）。
+  if (typeof loadMonitors === "function") loadMonitors();
+  const foldersEl = document.getElementById("folders");
+  if(foldersEl && !foldersEl.children.length){
+    api({ action:"list", parent:"root" }).then(r=>{
+      dbg(r);
+      if (r && r.ok && Array.isArray(r.items)){
+        renderFolders(r.items);
+      } else {
+        foldersEl.innerHTML = '<span class="err">加载根目录失败：' + esc(r?.error || '未知错误') + '</span>';
+      }
+    });
+  }
+}
+document.getElementById("bannerLoginBtn").onclick = () => { showLogin(); };
+setInterval(checkAuth, 60000);
+checkAuth();
+
+function dbg(o){ document.getElementById("debug").textContent = JSON.stringify(o, null, 2); }
+async function api(payload){
+  let resp, r;
+  try {
+    resp = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+    r = await resp.json();
+  } catch(e){
+    return { ok:false, error:"请求失败: "+e.message, needLogin:false };
+  }
+  if(r && r.needLogin){
+    showAuthBanner();
+    // 尝试自动重登：如果有本地缓存的 token，自动调用 login
+    const saved = readLocal("casgen_auth");
+    if(saved){
+      const prov = readLocal("casgen_prov") || "139";
+      const loginR = await api({ action:"login", provider:prov, authorization:saved });
+      if(loginR && loginR.ok){
+        hideAuthBanner();
+        // 重试原请求：直接用 fetch 避免递归调用 api 再次进入 auto-relogin
+        try {
+          resp = await fetch("/", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+          r = await resp.json();
+        } catch(e2){
+          return { ok:false, error:"请求失败: "+e2.message, needLogin:false };
+        }
+      }
+    }
+  }
+  return r;
+}
+function showAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="block"; showLogin(); }
+function hideAuthBanner(){ const b=document.getElementById("authBanner"); if(b) b.style.display="none"; }
+function onLoggedIn(prov){
+  const lc=document.getElementById("loginCard"); if(lc) lc.style.display="none";
+  const ls=document.getElementById("loginStatus");
+  if(ls) ls.innerHTML='已登录（'+(prov||"139")+'）· <a href="#" onclick="showLogin();return false;">重新登录</a>';
+}
+// 已登录后展示全部功能卡片（浏览/操作/恢复/分享/strm/重命名）。
+// 关键修复：刷新页面走 checkAuth→expandWorkspace 时，这些卡片默认 display:none，
+// 必须在这里统一显示，否则「浏览选择目录」入口在刷新后消失。
+function showAppCards(){
+  ["browseCard","opCard","restoreCard","shareCard","strmCard","renameCard"].forEach(id=>{
+    const el = document.getElementById(id); if(el) el.style.display = "block";
+  });
+}
+function showLogin(){
+  const lc=document.getElementById("loginCard"); if(lc) lc.style.display="";
+  const a=document.getElementById("auth"); if(a) a.scrollIntoView({behavior:"smooth"});
+}
+function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+// [3.0] 链接监控版块：拉取并渲染监控列表（之前前端未接线，导致版块空白看不到记录）
+const MON_STATUS_TEXT = { pending:"待扫描", ok:"正常", invalid:"链接失效", paused:"已暂停", error:"异常" };
+function monStatusBadge(st){
+  const txt = MON_STATUS_TEXT[st] || st || "未知";
+  const cls = (st==="ok") ? "ok" : (st==="error"||st==="invalid") ? "err" : (st==="paused") ? "warn" : "muted";
+  return '<span class="'+cls+'">'+esc(txt)+'</span>';
+}
+async function loadMonitors(){
+  const tbody = document.querySelector("#monTable tbody");
+  if(!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="8" class="muted">加载中…</td></tr>';
+  const r = await api({ action:"monitor_list" });
+  dbg(r);
+  if(!r || !r.ok || !Array.isArray(r.monitors)){
+    tbody.innerHTML = '<tr><td colspan="8" class="err">加载失败：'+esc(r&&r.error||"未知错误")+'</td></tr>';
+    return;
+  }
+  const list = r.monitors;
+  if(!list.length){
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">还没有监控项。去「分享一条龙」勾选「转存后同时开启链接监控」即可添加。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = list.map(m=>{
+    const shareUrl = "https://yun.139.com/shareweb/#/w/i/" + esc(m.link_id);
+    const lock = m.pwd ? " 🔒" : " 🔓";
+    const last = m.last_scan || "从未";
+    return '<tr>'
+      + '<td>'+(m.link_name ? '<b>'+esc(m.link_name)+'</b>' : '<span class="muted">'+esc(m.link_id)+'</span>')+'</td>'
+      + '<td><a href="'+shareUrl+'" target="_blank" rel="noopener">'+esc(m.link_id)+'</a>'+lock+'</td>'
+      + '<td>'+esc(m.target)+'</td>'
+      + '<td>'+esc(m.interval_min)+' 分</td>'
+      + '<td>'+monStatusBadge(m.status)+'</td>'
+      + '<td>'+esc(last)+'</td>'
+      + '<td class="muted" style="max-width:300px;word-break:break-all">'+esc(m.last_result||"")+'</td>'
+      + '<td><button type="button" class="sec" onclick="scanMonitor(\''+esc(m.id)+'\')">立即扫描</button> '
+      + '<button type="button" class="sec" onclick="removeMonitor(\''+esc(m.id)+'\')">删除</button></td>'
+      + '</tr>';
+  }).join("");
+}
+async function scanMonitor(id){
+  const statusEl = document.getElementById("monitorScanMsg");
+  const setMsg = (t, cls) => { if(statusEl) statusEl.innerHTML = '<span class="'+(cls||'ok')+'">'+esc(t)+'</span>'; };
+  setMsg("已开始扫描，请稍候…", "ok");
+  try {
+    const r = await api({ action:"monitor_scan_now", id });
+    if (!r || !r.ok){ setMsg("启动扫描失败："+esc(r&&r.error||"未知"), "err"); return; }
+  } catch(e){ setMsg("请求出错："+esc(e), "err"); return; }
+  const poll = async () => {
+    try {
+      const s = await api({ action:"monitor_scan_status", id });
+      if (s && s.scanning){
+        setMsg("扫描中：" + (s.phase || "处理中…"), "ok");
+        setTimeout(poll, 1500);
+      } else if (s && s.status === "done"){
+        setMsg("扫描完成：" + (s.added ? ("新增 "+s.added+" 个视频，已转存并生成 CAS") : "无新增剧集"), "ok");
+        loadMonitors();
+      } else if (s && s.status === "error"){
+        setMsg("扫描失败：" + esc(s.error || "未知错误"), "err");
+        loadMonitors();
+      } else {
+        loadMonitors();
+      }
+    } catch(e){ setTimeout(poll, 2000); }
+  };
+  poll();
+}
+async function removeMonitor(id){
+  if(!confirm("确定删除该监控项？")) return;
+  const r = await api({ action:"monitor_remove", id });
+  dbg(r);
+  loadMonitors();
+}
+
+// 监控版块内直接添加分享链接（只建基线，不重复转存已有内容，方便追新）
+document.getElementById("monAddBtn").onclick = async () => {
+  const text = (document.getElementById("monText").value || "").trim();
+  const target = (document.getElementById("monTarget").value || "").trim();
+  const autoCas = document.getElementById("monAutoCas").checked;
+  const deleteSrc = document.getElementById("monDeleteSrc").checked;
+  const preserveStruct = document.getElementById("monStruct").checked;
+  const interval = Math.max(60, parseInt(document.getElementById("monInterval").value, 10) || 60);
+  const msg = document.getElementById("monAddMsg");
+  if (!text){ msg.innerHTML = '<span class="err">请先粘贴分享链接</span>'; return; }
+  msg.innerHTML = '<span class="ok">验证链接并建立基线…</span>';
+  try {
+    const r = await api({ action:"monitor_add", text, target, auto_cas:autoCas,
+                          delete_source:deleteSrc, preserve_structure:preserveStruct, interval_min:interval });
+    dbg(r);
+    if (!r.ok){ msg.innerHTML = '<span class="err">添加失败：'+esc(r.error||"未知")+'</span>'; return; }
+    const m = r.monitor || {};
+    const cnt = (m.last_files || []).length;
+    msg.innerHTML = '<span class="ok">已添加监控：<b>'+esc(m.link_name || m.link_id)+'</b>（基线 '+cnt+' 个视频，后续新增自动追更）</span>';
+    document.getElementById("monText").value = "";
+    loadMonitors();
+  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
 document.getElementById("loginBtn").onclick = async () => {
-  const btn = document.getElementById("loginBtn");
   const prov = document.querySelector('input[name=prov]:checked').value;
   const auth = document.getElementById("auth").value.trim();
   const msg = document.getElementById("loginMsg");
   msg.innerHTML = "登录中…";
-  await withLoading(btn, async ()=>{
-    try {
-      const r = await api({action:"login", provider:prov, authorization:auth});
-      dbg(r);
-      if (r.version) document.getElementById("ver").textContent = "v"+r.version;
-      if (!r.ok){ msg.innerHTML = '<span class="err">失败：'+esc(r.error)+'</span>'; showToast("登录失败："+r.error,"error"); return; }
-      msg.innerHTML = '<span class="ok">登录成功 ✔ 根目录共 '+(r.count||0)+' 个项目</span> <span class="muted">[版本 '+(r.version||"未知")+']</span>';
-      showToast("登录成功 ✔","success");
-      document.getElementById("browseCard").style.display = "block";
-      try { writeLocal("casgen_auth", auth); writeLocal("casgen_prov", prov); }catch(e){}
-      state.path = [["root","根目录"]];
-      renderCrumb();
-      renderFolders(r.root || []);
-      checkAuth();
-    } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; showToast("请求出错："+e,"error"); }
-  }, "登录中…");
+  try {
+    const r = await api({ action:"login", provider:prov, authorization:auth });
+    dbg(r);
+    if (r.version) document.getElementById("ver").textContent = "v"+r.version;
+    if (!r.ok){ msg.innerHTML = '<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    msg.innerHTML = '<span class="ok">登录成功 ✔ 根目录共 '+(r.count||0)+' 个项目</span> <span class="muted">[程序版本 '+(r.version||document.getElementById("ver").textContent||"未知")+']</span>';
+    showAppCards();
+    try { localStorage.setItem("casgen_auth", auth); localStorage.setItem("casgen_prov", prov); } catch(e){}
+    state.path = [["root","根目录"]];
+    renderCrumb();
+    renderFolders(r.root || []);
+    checkAuth();  // 登录成功后立即刷新失效状态（隐藏横幅）
+  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
 };
 
-// ========== 目录浏览 ==========
 function renderCrumb(){
   const el = document.getElementById("crumb");
-  el.innerHTML = state.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+  el.innerHTML = state.path.map((p,i)=> '<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
   el.querySelectorAll("a").forEach(a=>{
     a.onclick = async () => {
       const i = +a.dataset.i;
       state.path = state.path.slice(0, i+1);
       state.currentParent = state.path[i][0];
-      const r = await api({action:"list", parent:state.currentParent});
+      const r = await api({ action:"list", parent: state.currentParent });
       dbg(r); renderFolders(r.items||[]); renderCrumb();
     };
   });
@@ -169,9 +551,12 @@ function renderCrumb(){
 
 async function renderFolders(items){
   const el = document.getElementById("folders");
-  if (!items || !Array.isArray(items)) items = [];
+  if (!items || !Array.isArray(items)){
+    console.warn("[renderFolders] 收到无效数据:", items);
+    items = [];
+  }
   el.innerHTML = "";
-  items.forEach(it=>{
+  (items||[]).forEach(it=>{
     if (!it || typeof it !== "object") return;
     if (it.type !== "folder") return;
     const d = document.createElement("span");
@@ -179,15 +564,19 @@ async function renderFolders(items){
     d.textContent = "📁 " + it.name;
     d.onclick = async () => {
       const fid = it.fileId || it._rawId || "";
-      if (!fid){ alert("该目录缺少 fileId，无法展开。请打开底部「🛠 原始接口返回」，把 list 子目录的 raw 数据发给我定位。"); return; }
+      if (!fid){
+        alert("该目录缺少 fileId，无法展开。请打开页面底部「🛠 原始接口返回」，把点击后 list 子目录的 raw 数据发给我定位。");
+        return;
+      }
       state.currentParent = fid;
       state.path.push([fid, it.name]);
-      const r = await api({action:"list", parent:fid});
+      const r = await api({ action:"list", parent: fid });
       dbg(r);
       if (r && r.ok && Array.isArray(r.items)){
         renderFolders(r.items);
       } else {
         alert("加载子目录失败：" + (r?.error || "未知错误"));
+        // 回滚
         state.path.pop();
       }
       renderCrumb();
@@ -201,67 +590,380 @@ document.getElementById("useFolderBtn").onclick = () => {
   state.selectedRoot = state.currentParent;
   state.selectedName = state.path[state.path.length-1][1];
   document.getElementById("selFolderName").textContent = "已选定：" + state.selectedName + "（" + state.selectedRoot + "）";
-  
-  // 保存到 localStorage 供子页面读取
-  try {
-    localStorage.setItem("casgen_selected_root", state.selectedRoot);
-    localStorage.setItem("casgen_selected_name", state.selectedName);
-    // 保存从云盘根到选中目录的完整相对路径（如 "电影/科幻"），修复 .strm 链接缺失上层目录导致无法播放
-    try {
-      const pathParts = state.path.slice(1).map(p => p[1]);
-      localStorage.setItem("casgen_selected_path", pathParts.join("/"));
-    } catch(e){}
-    document.getElementById("selInfoText").textContent = state.selectedName + "（" + state.selectedRoot + "）";
-    document.getElementById("selectedInfo").style.display = "block";
-  }catch(e){}
 };
 
-// ========== 登录态检测 ==========
-async function checkAuth(){
-  try{
-    const d = await api({action:"login_status"});
-    if(d && d.expired){ showAuthBanner(); return; }
-    hideAuthBanner();
-  }catch(e){}
-}
-setInterval(checkAuth, 60000);
-checkAuth();
+document.getElementById("planBtn").onclick = async () => {
+  const msg = document.getElementById("planMsg");
+  msg.innerHTML = "分析中（可能要遍历很多文件，请稍候）…";
+  const r = await api({ action:"plan", root: state.selectedRoot });
+  dbg(r);
+  if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+  let s = '可生成 .cas：<b>'+r.can_count+'</b> 个；跳过（云端无 SHA256）：<b>'+r.skip_count+'</b> 个。<br>';
+  if (r.skip && r.skip.length){
+    s += '<span class="muted">跳过样例：'+r.skip.slice(0,10).map(x=>esc(x.name)).join("、")+(r.skip.length>10?" …":"")+'</span>';
+  }
+  msg.innerHTML = s;
+};
 
-// ========== 自动回填上次 token + 版本号 + WebDAV 信息 ==========
-window.addEventListener("load", ()=>{
-  // 自动填充版本号（不等登录，直接从 /api/version 取）
-  fetch("/api/version").then(r=>r.json()).then(v=>{
-    if(v && v.ok && v.version){
-      const el = document.getElementById("ver");
-      if(el) el.textContent = "v"+v.version;
+document.getElementById("convertBtn").onclick = async () => {
+  const del = document.getElementById("delChk").checked;
+  const msg = document.getElementById("convMsg");
+  msg.innerHTML = "转换中（零流量，只传几 KB 的 cas）…";
+  const r = await api({ action:"convert", root: state.selectedRoot, delete_source: del });
+  dbg(r);
+  if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+  let ok=0, skip=0, err=0;
+  (r.results||[]).forEach(x=>{ if(x.status==="uploaded") ok++; else if(x.status==="skipped_no_sha256") skip++; else if(x.status==="upload_failed") err++; });
+  msg.innerHTML = '<span class="ok">完成：上传 .cas '+ok+' 个，跳过 '+skip+' 个'+(err?'，上传失败 '+err+' 个':'')+(del?'，已删除原视频':'（原视频保留在云盘）')+'</span><br><span class="muted">.cas 已上传到原视频所在的云盘文件夹，去云盘确认一下是否出现</span>';
+  renderRecords(r.results||[]);
+};
+
+function renderRecords(results){
+  const tb = document.querySelector("#recTable tbody");
+  tb.innerHTML = "";
+  results.filter(x=>x.status==="uploaded").forEach(x=>{
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(x.size)+'</td>';
+    const td = document.createElement("td");
+    const b = document.createElement("button");
+    b.textContent = "恢复";
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "恢复中…";
+      const r = await api({ action:"restore", sha256:x.sha256, size:x.size, name:x.name.replace(/\.cas$/,""), parent:x.parent });
+      dbg(r);
+      b.textContent = r.ok ? "已恢复 ✔" : "失败";
+      if(!r.ok) b.disabled=false;
+    };
+    td.appendChild(b); tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+  if(!tb.children.length) tb.innerHTML = '<tr><td colspan="3" class="muted">暂无记录</td></tr>';
+}
+
+// ---------- [2.0] 分享链接一条龙 ----------
+document.getElementById("shareParseBtn").onclick = async () => {
+  const text = document.getElementById("shareText").value;
+  const msg = document.getElementById("shareMsg");
+  msg.innerHTML = "解析中…";
+  try {
+    const r = await api({ action:"share_parse", text });
+    dbg(r);
+    if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+    if (r.monitorAdded && typeof loadMonitors==="function") loadMonitors();
+    msg.innerHTML = '<span class="ok">解析成功：共 '+r.count+' 个视频'+(r.needPwd?'（已自动识别提取码）':'')+(r.linkName?'，分享名：'+esc(r.linkName):'')+'</span>';
+    const catEl = document.getElementById("shareCatalogs");
+    if (r.catalogCount){
+      catEl.innerHTML = '📁 影视剧（'+r.catalogCount+'）：' + (r.catalogs||[]).map(c=>esc(c.name||c.catalogID)).join('、');
+    } else {
+      catEl.innerHTML = '（该分享为平铺视频，无影视剧子目录，将直接转入目标目录）';
     }
-    // WebDAV 信息
-    if(v && v.ok && v.webdav && v.webdav.enabled){
-      const card = document.getElementById("webdavCard");
-      if(card) card.style.display = "block";
-      document.getElementById("webdavUrl").textContent = window.location.origin + "/dav/";
-      document.getElementById("webdavUser").textContent = v.webdav.user || "";
-      document.getElementById("webdavPass").textContent = "***（环境变量 CASGEN_WEBDAV_PASS）";
-      document.getElementById("webdavRoot").textContent = v.webdav.root || "root";
+    const tb = document.querySelector("#shareTable tbody"); tb.innerHTML="";
+    (r.files||[]).forEach(f=>{
+      const tr=document.createElement("tr");
+      const fdir = (f.folders&&f.folders.length)? f.folders.join("/") : "（顶层）";
+      tr.innerHTML='<td>'+esc(f.contentName)+'</td><td>'+esc(f.contentSize)+'</td><td>'+esc(fdir)+'</td>';
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="3" class="muted">没有视频文件</td></tr>';
+  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+document.getElementById("shareSaveBtn").onclick = async () => {
+  const text = document.getElementById("shareText").value;
+  const target = document.getElementById("shareTarget").value;
+    const autoCas = document.getElementById("shareAutoCas").checked;
+    const deleteSrc = document.getElementById("shareDeleteSrc").checked;
+    const preserveStruct = document.getElementById("shareStruct").checked;
+    const monitorOn = document.getElementById("shareMonitor").checked;
+    const msg = document.getElementById("shareMsg");
+    msg.innerHTML = autoCas ? "转存中…（转存完成后会自动开始生成 CAS）" : "转存中…";
+    try {
+      const r = await api({ action:"share_save", text, target, auto_cas:autoCas, delete_source:deleteSrc, preserve_structure:preserveStruct, monitor:monitorOn });
+    dbg(r);
+    if (!r.ok){ msg.innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
+    const structTxt = (r.structurePreserved ? ('，已按 '+ (r.catalogCount||0) +' 个影视剧分文件夹') : '');
+    const monTxt = r.monitorAdded ? '；已开启链接监控（每小时自动扫描新增剧集）' : '';
+    const baseTxt = '已转存 '+r.saved+' 个视频到我云盘目录（catalogID='+esc(r.targetCatalog)+'）'+structTxt+monTxt;
+    if (r.autoCas && r.jobId){
+      // 转存已成功，CAS 生成在后台跑，前端轮询进度
+      msg.innerHTML = '<span class="ok">'+baseTxt+'；CAS 生成中…</span>';
+      pollCasJob(r.jobId, msg, baseTxt);
+    } else {
+      msg.innerHTML = '<span class="ok">'+baseTxt+'</span>';
     }
-  }).catch(()=>{});
-  const saved = readLocal("casgen_auth");
-  if(saved){
-    document.getElementById("auth").value = saved;
-    const prov = readLocal("casgen_prov") || "139";
-    const rb = document.querySelector('input[name=prov][value="'+prov+'"]');
-    if(rb) rb.checked = true;
+  } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+// 轮询后台 CAS 生成任务进度（"转存并生成 CAS 一条龙"时，CAS 在后台跑）
+function pollCasJob(jobId, msg, baseTxt){
+  const iv = setInterval(async () => {
+    try {
+      const r = await api({ action:"cas_job_status", jobId });
+      if (!r || !r.ok){ return; } // 轮询失败就继续等，不中断
+      if (r.status === "done"){
+        clearInterval(iv);
+        const res = r.results || [];
+        const up = res.filter(x=>x.status==='uploaded').length;
+        const dlEntry = res.find(x=>x.status==='deleted');
+        const dl = dlEntry ? (dlEntry.deletedCount || 0) : 0;
+        const skipped = res.filter(x=>x.status && String(x.status).startsWith('skipped')).length;
+        let t = baseTxt + '；已自动生成 ' + up + ' 个 CAS'
+              + (dl ? ('，并删除 '+dl+' 个原视频') : '')
+              + (skipped ? ('（'+skipped+' 个跳过）') : '');
+        msg.innerHTML = '<span class="ok">'+t+'</span>';
+      } else if (r.status === "error"){
+        clearInterval(iv);
+        msg.innerHTML = '<span class="err">'+esc(baseTxt+'；但自动生成 CAS 失败：'+(r.error||'未知错误'))+'</span>';
+      } else if (r.status === "waiting"){
+        msg.innerHTML = '<span class="ok">'+baseTxt+'；'+esc(r.phase || "等待 139 索引更新（刚转存的视频即将出现）…")+'</span>';
+      } else {
+        msg.innerHTML = '<span class="ok">'+baseTxt+'；'+esc(r.phase || ("CAS 生成中… (已处理 "+(r.done||0)+")"))+'</span>';
+      }
+    } catch(e){ /* 网络抖动则继续轮询 */ }
+  }, 2000);
+}
+
+// ---------- [4.0] 生成 Strm 文件（播放直链） ----------
+// 页面加载时回填上次填写的网关地址
+try { const u = localStorage.getItem("casgen_public_url"); if(u) document.getElementById("casgenPublicUrl").value = u; } catch(e){}
+document.getElementById("genStrmBtn").onclick = async () => {
+  const url = document.getElementById("casgenPublicUrl").value.trim();
+  if(!url){ document.getElementById("strmMsg").innerHTML='<span class="err">请先填写 casgen 网关地址</span>'; return; }
+  try{ localStorage.setItem("casgen_public_url", url); }catch(e){}
+  const root = state.strmRoot || state.selectedRoot || "root";
+  const msg = document.getElementById("strmMsg");
+  msg.innerHTML = "生成中（遍历选定文件夹下所有 .cas）…";
+  try{
+    const r = await api({ action:"generate_strm", root: root, publicUrl: url });
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    msg.innerHTML = '<span class="ok">完成 ✔ 共 '+r.count+' 个 .cas，成功生成 '+r.uploaded+' 个 .strm</span>'+
+                    (r.publicUrl?' <span class="muted">网关='+esc(r.publicUrl)+'</span>':'');
+    const tb = document.querySelector("#strmTable tbody"); tb.innerHTML="";
+    (r.results||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      const st = x.status==="uploaded" ? '<span class="ok">✔ 已生成</span>' : '<span class="err">✘ '+esc(x.error||"失败")+'</span>';
+      const link = x.status==="uploaded" ? '<code>'+esc(x.url)+'</code>' : '';
+      tr.innerHTML = "<td>"+esc(x.name)+"</td><td>"+st+"</td><td>"+link+"</td>";
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="3" class="muted">没有 .cas 文件可生成</td></tr>';
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+};
+
+// ---------- [4.0] L1 本地正则重命名 ----------
+async function doRename(dry){
+  const root = state.renameRoot || state.selectedRoot || "root";
+  const msg = document.getElementById("renameMsg");
+  msg.innerHTML = dry ? "预览中（只读，不改云盘）…" : "改名中…";
+  try{
+    const r = await api({ action:"rename_l1", root: root, dryRun: dry });
+    dbg(r);
+    if(!r.ok){ msg.innerHTML='<span class="err">失败：'+esc(r.error)+'</span>'; return; }
+    if(dry){
+      msg.innerHTML = '<span class="ok">预览完成 ✔ 共 '+(r.renamed+r.skipped+r.failed)+' 个 .cas，其中可改名 '+(r.renamed)+' 个（未改云盘）</span>';
+    } else {
+      msg.innerHTML = '<span class="ok">完成 ✔ 改名 '+(r.renamed)+' 个，跳过 '+(r.skipped)+' 个，失败 '+(r.failed)+' 个</span>';
+    }
+    const tb = document.querySelector("#renameTable tbody"); tb.innerHTML="";
+    (r.results||[]).forEach(x=>{
+      const tr=document.createElement("tr");
+      const st = x.status==="renamed" ? '<span class="ok">✔ 已改</span>'
+               : x.status==="skip" ? '<span class="muted">— 无需改</span>'
+               : x.status==="preview" ? '<span class="muted">待执行</span>'
+               : '<span class="err">✘ '+esc(x.error||"失败")+'</span>';
+      tr.innerHTML = "<td>"+esc(x.old)+"</td><td>→</td><td>"+esc(x.new)+"</td><td>"+st+"</td>";
+      tb.appendChild(tr);
+    });
+    if(!tb.children.length) tb.innerHTML='<tr><td colspan="4" class="muted">没有 .cas 文件</td></tr>';
+  }catch(e){ msg.innerHTML='<span class="err">请求出错：'+esc(e)+'</span>'; }
+}
+document.getElementById("renamePreviewBtn").onclick = () => doRename(true);
+document.getElementById("renameExecBtn").onclick = () => doRename(false);
+
+// ---------- 通用目录选择器（分享转存的目标目录，像上方那样点选） ----------
+// 选中后把路径拼成字符串填回输入框；后端 resolve_folder 按 / 逐级 find_or_create，无需改后端。
+function mountFolderPicker(prefix, targetInputId){
+  let pick = { currentParent:"root", path:[["root","根目录"]] };
+  const picker = document.getElementById(prefix+"Picker");
+  const crumb = document.getElementById(prefix+"Crumb");
+  const folders = document.getElementById(prefix+"Folders");
+  const cur = document.getElementById(prefix+"Cur");
+  const input = document.getElementById(targetInputId);
+  function renderCrumb(){
+    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+    crumb.querySelectorAll("a").forEach(a=>{
+      a.onclick = async () => {
+        const i = +a.dataset.i;
+        pick.path = pick.path.slice(0, i+1);
+        pick.currentParent = pick.path[i][0];
+        const r = await api({ action:"list", parent: pick.currentParent });
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)){
+          renderFolders(r.items);
+        } else {
+          alert("加载路径数据失败：" + (r?.error || "未知错误"));
+        }
+        renderCrumb();
+      };
+    });
   }
-  // 回填已选文件夹
-  const selRoot = readLocal("casgen_selected_root");
-  const selName = readLocal("casgen_selected_name");
-  if(selRoot && selName){
-    state.selectedRoot = selRoot;
-    state.selectedName = selName;
-    document.getElementById("selInfoText").textContent = selName + "（" + selRoot + "）";
-    document.getElementById("selectedInfo").style.display = "block";
+  async function renderFolders(items){
+    folders.innerHTML = "";
+    if (!items || !Array.isArray(items)){
+      folders.innerHTML = '<span class="err">加载失败，请重试</span>';
+      return;
+    }
+    items.forEach(it=>{
+      if (!it || typeof it !== "object") return;
+      if (it.type !== "folder") return;
+      const d = document.createElement("span");
+      d.className = "folder";
+      d.textContent = "📁 " + it.name;
+      d.onclick = async () => {
+        const fid = it.fileId || it._rawId || "";
+        if (!fid){ alert("该目录缺少 fileId，无法展开。"); return; }
+        pick.currentParent = fid;
+        pick.path.push([fid, it.name]);
+        const r = await api({ action:"list", parent: fid });
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)){
+          renderFolders(r.items);
+        } else {
+          alert("加载子目录失败：" + (r?.error || "未知错误"));
+          pick.path.pop();
+        }
+        renderCrumb();
+      };
+      folders.appendChild(d);
+    });
+    if (!folders.children.length) folders.innerHTML = '<span class="muted">（此文件夹内没有子文件夹）</span>';
   }
-});
+  document.getElementById(prefix+"Btn").onclick = async () => {
+    picker.style.display = "block";
+    pick = { currentParent:"root", path:[["root","根目录"]] };
+    const r = await api({ action:"list", parent:"root" });
+    dbg(r);
+    if (r && r.ok && Array.isArray(r.items)){
+      renderFolders(r.items);
+    } else {
+      folders.innerHTML = '<span class="err">加载根目录失败：' + esc(r?.error || '未知错误') + '</span>';
+    }
+    renderCrumb();
+    if (cur) cur.textContent = "";
+  };
+  document.getElementById(prefix+"Use").onclick = () => {
+    const parts = pick.path.slice(1).map(p=>p[1]);  // 去掉 root
+    input.value = parts.join("/");                   // 空字符串=根目录
+    if (cur) cur.textContent = "已选：" + (parts.join("/") || "根目录");
+    picker.style.display = "none";
+  };
+  document.getElementById(prefix+"NewBtn").onclick = async () => {
+    const name = document.getElementById(prefix+"NewName").value.trim();
+    if (!name) { if (cur) cur.textContent = "请输入目录名"; return; }
+    const r = await api({ action:"create_folder", parent: pick.currentParent, name });
+    dbg(r);
+    if (!r.ok) { if (cur) cur.textContent = "创建失败：" + esc(r.error); return; }
+    pick.currentParent = r.fileId;
+    pick.path.push([r.fileId, name]);
+    document.getElementById(prefix+"NewName").value = "";
+    const r2 = await api({ action:"list", parent: r.fileId });
+    dbg(r2);
+    if (r2 && r2.ok && Array.isArray(r2.items)){
+      renderFolders(r2.items);
+    }
+    renderCrumb();
+    if (cur) cur.textContent = "已新建并进入：" + name;
+  };
+  document.getElementById(prefix+"Cancel").onclick = () => {
+    picker.style.display = "none";
+  };
+}
+mountFolderPicker("share", "shareTarget");
+mountFolderPicker("mon", "monTarget");
+
+
+// ---------- 工具箱专用目录选择器（返回 fileId，供 generate_strm / rename_l1 使用） ----------
+function mountFolderPickerV2(prefix, onPick){
+  let pick = { currentParent:"root", path:[["root","根目录"]] };
+  const picker = document.getElementById(prefix+"Picker");
+  const crumb  = document.getElementById(prefix+"Crumb");
+  const folders= document.getElementById(prefix+"Folders");
+  const hint   = document.getElementById(prefix+"Hint");
+  function renderCrumb(){
+    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+    crumb.querySelectorAll("a").forEach(a=>{
+      a.onclick = async () => {
+        const i = +a.dataset.i;
+        pick.path = pick.path.slice(0, i+1);
+        pick.currentParent = pick.path[i][0];
+        const r = await api({ action:"list", parent: pick.currentParent });
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
+        else alert("加载路径数据失败：" + (r?.error || "未知错误"));
+        renderCrumb();
+      };
+    });
+  }
+  async function renderFolders(items){
+    folders.innerHTML = "";
+    if (!items || !Array.isArray(items)){ folders.innerHTML='<span class="err">加载失败，请重试</span>'; return; }
+    items.forEach(it=>{
+      if (!it || typeof it !== "object") return;
+      if (it.type !== "folder") return;
+      const d = document.createElement("span");
+      d.className = "folder"; d.textContent = "📁 " + it.name;
+      d.onclick = async () => {
+        const fid = it.fileId || it._rawId || "";
+        if (!fid){ alert("该目录缺少 fileId，无法展开。"); return; }
+        pick.currentParent = fid; pick.path.push([fid, it.name]);
+        const r = await api({ action:"list", parent: fid });
+        dbg(r);
+        if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
+        else { alert("加载子目录失败：" + (r?.error || "未知错误")); pick.path.pop(); }
+        renderCrumb();
+      };
+      folders.appendChild(d);
+    });
+    if (!folders.children.length) folders.innerHTML = '<span class="muted">（此文件夹内没有子文件夹）</span>';
+  }
+  document.getElementById(prefix+"Btn").onclick = async () => {
+    picker.style.display = "block";
+    pick = { currentParent:"root", path:[["root","根目录"]] };
+    const r = await api({ action:"list", parent:"root" });
+    dbg(r);
+    if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
+    else folders.innerHTML = '<span class="err">加载根目录失败：'+esc(r?.error||"未知错误")+'</span>';
+    renderCrumb();
+    if (hint) hint.textContent = "";
+  };
+  document.getElementById(prefix+"Use").onclick = () => {
+    const fileId = pick.currentParent;
+    const namePath = pick.path.map(p=>p[1]).join(" / ");
+    if (hint) hint.textContent = "已选：" + namePath;
+    picker.style.display = "none";
+    onPick(fileId, namePath);
+  };
+  document.getElementById(prefix+"Cancel").onclick = () => { picker.style.display = "none"; };
+  document.getElementById(prefix+"NewBtn").onclick = async () => {
+    const name = document.getElementById(prefix+"NewName").value.trim();
+    if (!name){ if (hint) hint.textContent = "请输入目录名"; return; }
+    const r = await api({ action:"create_folder", parent: pick.currentParent, name });
+    dbg(r);
+    if (!r.ok){ if (hint) hint.textContent = "创建失败：" + esc(r.error); return; }
+    pick.currentParent = r.fileId; pick.path.push([r.fileId, name]);
+    document.getElementById(prefix+"NewName").value = "";
+    const r2 = await api({ action:"list", parent: r.fileId });
+    dbg(r2);
+    if (r2 && r2.ok && Array.isArray(r2.items)) renderFolders(r2.items);
+    renderCrumb();
+    if (hint) hint.textContent = "已新建并进入：" + name;
+  };
+}
+mountFolderPickerV2("strmTools", (fid, name)=>{ state.strmRoot = fid; state.strmName = name; const c=document.getElementById("strmToolsCur"); if(c) c.textContent = "已选目录：" + name; });
+mountFolderPickerV2("renameTools", (fid, name)=>{ state.renameRoot = fid; state.renameName = name; const c=document.getElementById("renameToolsCur"); if(c) c.textContent = "已选目录：" + name; });
+
+
 </script>
 </body>
 </html>

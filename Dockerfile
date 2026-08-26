@@ -12,13 +12,13 @@ COPY --chown=casgen:casgen app.py yidong.py index.html utils.js README.md \
      convert.html share.html strm.html restore.html rename.html \
      rename.py monitor.py monitor_store.py share139.py healthcheck.py webdav.py ./
 
-# 端口策略（关键，避免抱脸 Spaces 一直重启）：
-#   - Hugging Face Spaces 不注入 PORT，而是探测固定端口 7860，因此 Dockerfile 默认值必须是 7860；
-#   - 飞牛 FnOS / FnDepot / 根 docker-compose 通过 environment: PORT=5000 覆盖为 5000（见各自 compose）。
+# 端口策略（关键，避免端口错配导致容器不健康 / 一直重启）：
+#   - 默认 PORT=5000，与 docker-compose 的端口映射(5000:5000)和 CI 冒烟测试(-p 5050:5000)一致；
+#   - Hugging Face Spaces 会在运行时通过环境变量注入 PORT=7860，覆盖此默认值，因此 HF 上仍监听 7860。
 # 这样同一份 Dockerfile 推到 HF / GitHub / Docker Hub 都不会因端口错配而崩溃。
-ENV PORT=7860
+ENV PORT=5000
 
-EXPOSE 7860
+EXPOSE 5000
 
 # 健康检查：每 30s 探活一次，5s 超时，启动预留 15s，连 3 次失败判不健康
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

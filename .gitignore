@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 casgen_debug.log
+casgen*.log
 .DS_Store
 *.fpk
 casgen_auth.json

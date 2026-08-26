@@ -1,16 +1,13 @@
-"""CAS 转换网页服务 - 纯标准库（无需 pip / 无需 Docker）。
+"""CAS 转换网页服务 - 纯标准库（无需 pip / 无需 Docker）?
 
-运行方式：
+运行方式??
     python3 app.py
-然后浏览器打开 http://localhost:5000  （若在 N1 盒子上跑，则用 http://N1的IP:5000）
+然后浏览器打开 http://localhost:5000  （若?? N1 盒子上跑，则?? http://N1的IP:5000??
 
-所有功能都在网页里用鼠标点，不用碰命令行、不用改代码。
+所有功能都在网页里用鼠标点，不用碰命令行、不用改代码??
 """
-import base64
 import json
 import os
-import re
-import signal
 import sys
 import threading
 import time
@@ -18,29 +15,34 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from yidong import Yun139, TokenExpired, __version__ as VERSION
+from yidong import Yun139, TokenExpired, __version__ as VERSION, VIDEO_EXT
 from share139 import (parse_share_input, get_share_info, list_all_share_files,
-                      list_share_root_items, save_share_files, ShareError)
+                      list_share_catalogs, save_share_files, transfer_share_files,
+                      transfer_share_videos, ShareError)
 import monitor
 import monitor_store
 import rename
-import webdav
 # from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
 PROVIDER = None
-AUTH_EXPIRED = False  # 登录态是否失效（token 过期等）；失效则提示重登并暂停监控
-MSISDN = ""  # 当前账号手机号（msisdn）：139 转存接口必填，登录时从 token 解码
+AUTH_EXPIRED = False  # 登录态是否失效（token 过期等）；失效则提示重登并暂停监??
 RECORDS = []  # 最近一次转换的记录，供"恢复播放"使用
+# 后台 CAS 生成任务??"转存并生?? CAS 一条龙"时，避免长请求卡死浏览器??
+CAS_JOBS = {}
+CAS_JOBS_LOCK = threading.Lock()
+_JOB_SEQ = [0]
+# 链接监控"立即扫描"的异步状态：mid -> {phase,status,msg,added,total,error}
+MONITOR_SCAN_JOBS = {}
+MONITOR_SCAN_LOCK = threading.Lock()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(ROOT, "index.html")
 DEBUG_LOG = os.path.join(ROOT, "casgen_debug.log")
 AUTH_FILE = os.path.join(ROOT, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
-_START_TS = time.time()  # 进程启动时间，供 /api/health 计算 uptime
 
 
 def _log_debug(tag, obj):
-    """把关键调试信息追加写入 casgen_debug.log，方便小白用户直接把文件发来分析。"""
+    """把关键调试信息追加写?? casgen_debug.log，方便小白用户直接把文件发来分析??"""
     try:
         with open(DEBUG_LOG, "a", encoding="utf-8") as f:
             f.write("[%s] %s\n" % (tag, json.dumps(obj, ensure_ascii=False)))
@@ -48,38 +50,9 @@ def _log_debug(tag, obj):
         pass
 
 
-# ============================ 手机号(msisdn) 提取 ============================
-def _extract_phone(auth):
-    """从 Authorization(base64) 里抠出手机号(msisdn)。139 转存接口必填。
-    解码后格式： pc:<11位手机号>:<其余>。"""
-    if not auth:
-        return ""
-    try:
-        try:
-            raw = base64.b64decode(auth)
-        except Exception:
-            raw = base64.b64decode(auth + "===")
-        parts = raw.decode("utf-8", "ignore").split(":")
-        if len(parts) >= 2 and re.fullmatch(r"\d{11}", parts[1] or ""):
-            return parts[1]
-    except Exception:
-        pass
-    return ""
-
-
-def _apply_msisdn(auth):
-    """登录时调用：解码手机号并同步给监控模块（转存必填）。"""
-    global MSISDN
-    MSISDN = _extract_phone(auth)
-    try:
-        monitor.set_phone(MSISDN)
-    except Exception:
-        pass
-
-
-# ============================ 登录态持久化（3.0 模块一） ============================
+# ============================ 登录态持久化??3.0 模块一?? ============================
 def _save_auth(auth, provider):
-    """把登录凭证落盘，重启/刷新页面后自动恢复，无需重新粘贴。"""
+    """把登录凭证落盘，重启/刷新页面后自动恢复，无需重新粘贴??"""
     try:
         with open(AUTH_FILE, "w", encoding="utf-8") as f:
             json.dump({"token": auth, "provider": provider}, f)
@@ -97,251 +70,147 @@ def _load_auth():
     return None
 
 
-# ============================ Strm 生成后台任务 + 进度轮询 ============================
-# 生成 .strm 要遍历整个云盘目录树并逐个上传，耗时很长；改为后台线程执行，
-# 前端通过 /api/strm_progress?task=<id> 轮询实时进度（进度条 + 计数器 + 当前文件名）。
-import uuid as _uuid
-
-_STRM_TASKS = {}
-_STRM_LOCK = threading.Lock()
-
-
-def _new_strm_task():
-    tid = _uuid.uuid4().hex
-    # 限制内存占用：超过 64 个任务时清理已完成的旧任务
-    with _STRM_LOCK:
-        if len(_STRM_TASKS) > 64:
-            finished = [k for k, v in _STRM_TASKS.items() if v.get("finished")]
-            for k in finished[: max(0, len(_STRM_TASKS) - 64)]:
-                _STRM_TASKS.pop(k, None)
-    return tid
-
-
-def _strm_progress_cb(task_id):
-    """把 generate_strm 的进度回调合并进任务存储。"""
-    def cb(pr):
-        with _STRM_LOCK:
-            t = _STRM_TASKS.get(task_id)
-            if not t:
-                return
-            for k in ("phase", "scanned", "cas_found", "done", "total", "name"):
-                if k in pr:
-                    t[k] = pr[k]
-    return cb
-
-
-def _run_strm_task(task_id, root, public_url, root_path, clean_old):
+def _count_videos(client, catalog):
+    """ݹͳĳĿ¼£Ŀ¼Ƶļڵ 139 ӳ١
+    ṹƵ target/<>/ Ƕײ㣬ݹ"""
     try:
-        results = CLIENT.generate_strm(root, public_url, path_prefix=root_path,
-                                       clean_old=clean_old, progress_cb=_strm_progress_cb(task_id))
-        created = skipped = failed = cleaned = 0
-        for r in results:
-            s = r.get("status")
-            if s in ("uploaded", "recreated"):
-                created += 1
-                if s == "recreated":
-                    cleaned += 1
-            elif s == "skipped_existing":
-                skipped += 1
-            elif s in ("failed", "clean_failed", "scan_failed"):
-                failed += 1
-        with _STRM_LOCK:
-            t = _STRM_TASKS.get(task_id)
-            if t:
-                t.update({"finished": True, "phase": "done", "created": created,
-                          "skipped": skipped, "failed": failed, "cleaned": cleaned,
-                          "results": results, "error": None})
-    except TokenExpired as e:
-        import traceback
-        traceback.print_exc()
-        with _STRM_LOCK:
-            t = _STRM_TASKS.get(task_id)
-            if t:
-                t.update({"finished": True, "phase": "error", "needLogin": True,
-                          "error": "登录已失效（令牌过期）：请返回首页重新粘贴有效的 139 令牌后再生成。"})
+        n = 0
+        root = catalog if catalog not in ("root", "/") else "root"
+        for it in client.iter_all(root, max_depth=20):
+            if client._is_folder(it):
+                continue
+            name = client._name(it)
+            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+            if ext in VIDEO_EXT:
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def _existing_stems(client, target_catalog):
+    """收集 target_catalog 下（递归）已存在的 .cas 文件对应的视频文件名（含扩展名，如 '第11集.mkv'）。
+    生成 CAS 后源视频会被删除，目标目录只剩 .cas，故以 .cas 是否存在判断某剧集是否已处理，
+    从而智能跳过（不重复转存/生成）。"""
+    stems = set()
+    try:
+        for it in client.iter_all(target_catalog):
+            if client._is_folder(it):
+                continue
+            nm = client._name(it) or ""
+            if not nm.endswith(".cas"):
+                continue
+            video_name = nm[:-4]  # 去掉 .cas 后缀 -> '第11集.mkv'
+            if video_name:
+                stems.add(video_name)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        with _STRM_LOCK:
-            t = _STRM_TASKS.get(task_id)
-            if t:
-                t.update({"finished": True, "phase": "error", "error": str(e)})
+        _log_debug("existing_scan", {"error": str(e)})
+    return stems
+
+
+def _fstem_of(f):
+    """取分享视频的文件名（含扩展名），与 _existing_stems 的 video_name 对应，用于同名匹配。"""
+    return f.get("contentName") or f.get("coName") or ""
+
+
+def _run_cas_job(job_id, client, target_catalog, delete_source, expected=0, pre_count=0, on_phase=None):
+    """后台线程：等 139 索引延迟过后，对转存后的目录生成 CAS。进度写? CAS_JOBS[job_id]，前端轮询。"""
+    def _set_phase(ph):
+        with CAS_JOBS_LOCK:
+            j = CAS_JOBS.setdefault(job_id, {})
+            j["phase"] = ph
+        if callable(on_phase):
+            try:
+                on_phase(ph)
+            except Exception:
+                pass
+    try:
+        # 139 转存?"索引延迟"：刚保存的文件要等若干秒才出现在目录列表里?
+        # 先轮询等到目录视频数达到"基线+预期新增"，或超时（最? 3 分钟）再生成?
+        # 否则 generate 列到 0 个视? ? 生成 0 ? .cas（正是之?"转存成功但没生成"的原因）?
+        baseline = pre_count  # 转存前已有视频数(递归计数)，由 share_save 在转存前测量后传入
+        deadline = time.time() + 180
+        with CAS_JOBS_LOCK:
+            CAS_JOBS[job_id]["status"] = "waiting"
+        _set_phase("转存完成，等待 139 索引更新")
+        while time.time() < deadline:
+            cur = _count_videos(client, target_catalog)
+            # 关键：转存在后台任务启动前往往已完成，目录里可能已有这些视频?
+            # 只要"当前视频? >= 预期新增?"?"比基线多出了预期?"，就说明已就位，立即生成?
+            # 否则会一直等 baseline+expected 而永远等不到（表现为 CAS 卡死 3 分钟）?
+            if expected and cur >= baseline + expected:
+                break
+            if not expected and cur > baseline:
+                break
+            time.sleep(8)
+        with CAS_JOBS_LOCK:
+            CAS_JOBS[job_id]["status"] = "running"
+        _set_phase("正在生成 CAS")
+
+        def _prog(n):
+            with CAS_JOBS_LOCK:
+                j = CAS_JOBS.get(job_id)
+                if j:
+                    j["done"] = n
+        # generate 阶段回调：把内部阶段（生成中/删除原视频中/完成）映射回 phase
+        def _gen_phase(ph, info=None):
+            if ph == "generating":
+                _set_phase("正在生成 CAS")
+            elif ph == "deleting":
+                _set_phase("正在删除原视频（已处理 %d 个）" % (info or {}).get("count", 0))
+            elif ph == "done":
+                _set_phase("全部完成")
+        results = client.generate(target_catalog, delete_source=delete_source, progress=_prog, on_phase=_gen_phase)
+        with CAS_JOBS_LOCK:
+            CAS_JOBS[job_id].update({"status": "done", "phase": "全部完成", "results": results,
+                                     "done": len(results) if results else CAS_JOBS[job_id].get("done", 0)})
+    except Exception as e:
+        import traceback as _tb
+        _log_debug("cas_job_error", {"job": job_id, "error": repr(e), "trace": _tb.format_exc()})
+        with CAS_JOBS_LOCK:
+            CAS_JOBS[job_id].update({"status": "error", "phase": "失败：" + str(e), "error": str(e)})
 
 
 class H(BaseHTTPRequestHandler):
-    # WebDAV/流式转发用 HTTP/1.1：支持 keep-alive 与标准 Range 流式，
-    # 避免 HTTP/1.0 下网曝米花等播放器报「网络错误 / WebDAV 错误」。
-    protocol_version = "HTTP/1.1"
-
-    def handle(self):
-        """记录请求开始时间，供 log_request 计算耗时。"""
-        self._t0 = time.monotonic()
-        try:
-            super().handle()
-        except (BrokenPipeError, ConnectionResetError):
-            # 客户端提前断开（播放器跳播/用户关闭页面），属于正常现象，静默忽略
-            pass
-
     def log_message(self, *a):
-        # 屏蔽 BaseHTTPRequestHandler 默认 stderr 日志（格式对运维不友好），改用 log_request
         pass
-
-    def log_request(self, code="-", size="-"):
-        try:
-            dur_ms = (time.monotonic() - getattr(self, "_t0", time.monotonic())) * 1000
-        except Exception:
-            dur_ms = 0
-        try:
-            line = "%s - %s %s -> %s (%sB, %.1fms)\n" % (
-                time.strftime("%H:%M:%S"), self.command, self.path, code, size, dur_ms)
-            sys.stderr.write(line)
-            sys.stderr.flush()
-        except Exception:
-            pass
-
-    def log_error(self, format, *args):
-        # 错误也走统一格式
-        try:
-            sys.stderr.write("%s - ERROR %s %s: %s\n" % (
-                time.strftime("%H:%M:%S"), self.command, self.path, format % args))
-            sys.stderr.flush()
-        except Exception:
-            pass
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
-        # WebDAV GET 优先
-        if self.path.startswith("/dav/"):
-            return webdav.handle_get(self, schedule_cleanup_fn=self._schedule_cas_cleanup)
-        # 静态 HTML 文件服务
-        html_paths = ("/", "/index.html", "/convert.html", "/share.html", "/strm.html",
-                      "/restore.html", "/rename.html", "/utils.js")
-        if self.path in html_paths:
-            filename = self.path.lstrip("/") or "index.html"
-            fpath = os.path.join(ROOT, filename)
-            # 防御路径穿越：确保解析后的绝对路径仍在 ROOT 内
-            if not os.path.abspath(fpath).startswith(os.path.abspath(ROOT)):
-                self._json({"error": "forbidden"}, 403)
-                return
-            if not os.path.exists(fpath):
-                self._json({"error": f"{filename} 文件不存在"}, 404)
-                return
+        if self.path in ("/", "/index.html"):
             try:
-                with open(fpath, "rb") as f:
+                with open(INDEX, "rb") as f:
                     body = f.read()
-                ctype = "text/html; charset=utf-8" if filename.endswith(".html") else "application/javascript; charset=utf-8"
-                self.send_response(200)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception as e:
-                self._json({"error": str(e)}, 500)
+            except Exception:
+                self._json({"error": "index.html 缺失，请确认它和 app.py 在同一目录"}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path.startswith("/cas/"):
             self.handle_cas(self.path[len("/cas/"):])
         elif self.path == "/api/health":
-            self._json({
-                "ok": True,
-                "version": VERSION,
-                "loggedIn": CLIENT is not None,
-                "expired": AUTH_EXPIRED,
-                "schedulerRunning": monitor.is_scheduler_running() if hasattr(monitor, "is_scheduler_running") else False,
-                "uptime_s": int(time.time() - _START_TS),
-            })
+            # Docker HEALTHCHECK / CI 冒烟测试探测点
+            self._json({"ok": True, "status": "up", "version": VERSION})
         elif self.path == "/api/version":
-            public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip()
-            self._json({
-                "ok": True,
-                "version": VERSION,
-                "publicUrlConfigured": bool(public_url),
-                "publicUrl": public_url or None,
-                "webdav": webdav.get_info(),
-                "endpoints": {
-                    "health": "/api/health",
-                    "version": "/api/version",
-                    "casGateway": "/cas/<139相对路径>/<xxx.cas>",
-                    "webdav": "/dav/" if webdav.is_enabled() else None,
-                },
-            })
-        elif self.path.startswith("/api/strm_progress"):
-            # Strm 生成进度轮询：/api/strm_progress?task=<id>
-            qs = urllib.parse.urlparse(self.path).query
-            params = urllib.parse.parse_qs(qs)
-            task_id = (params.get("task") or [""])[0]
-            with _STRM_LOCK:
-                t = _STRM_TASKS.get(task_id)
-                if t is None:
-                    self._json({"ok": False, "error": "任务不存在或已过期，请重新生成"}, 404)
-                    return
-                snap = dict(t)
-            self._json({"ok": True, **snap})
+            self._json({"ok": True, "version": VERSION})
         else:
-            self._json({"error": "not found", "hint": "试试 /api/health 或 /api/version"}, 404)
-
-    # ---------- WebDAV 方法 ----------
-    def do_OPTIONS(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_options(self)
-        self.send_response(200)
-        self.send_header("Allow", "GET,POST,OPTIONS")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def do_PROPFIND(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_propfind(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_HEAD(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_head(self)
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-
-    def do_PUT(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_put(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_DELETE(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_delete(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_MKCOL(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_mkcol(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_MOVE(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_move(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_LOCK(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_lock(self)
-        self._json({"error": "not found"}, 404)
-
-    def do_UNLOCK(self):
-        if self.path.startswith("/dav/"):
-            return webdav.handle_unlock(self)
-        self._json({"error": "not found"}, 404)
+            self._json({"error": "not found"}, 404)
 
     def handle_cas(self, rel_path):
-        """CAS→Strm 播放网关：/cas/<139相对路径>/<xxx.cas> -> 读.cas -> 秒传恢复 -> 302 直链。
-        播放器（网易爆米花/飞牛影视）读 .strm 里的 URL 命中这里，直连 139 直链播放，不耗 casgen 带宽。"""
+        """CAS→Strm 播放网关??/cas/<139相对路径>/<xxx.cas> -> ??.cas -> 秒传恢复 -> 302 直链??
+        播放器（网易爆米??/飞牛影视）读 .strm 里的 URL 命中这里，直?? 139 直链播放，不?? casgen 带宽??"""
         if CLIENT is None:
-            self._json({"error": "未登录 139 云盘，请先在网页登录"}, 401)
+            self._json({"error": "未登?? 139 云盘，请先在网页登录"}, 401)
             return
         rel_path = urllib.parse.unquote(rel_path)
         try:
@@ -351,20 +220,23 @@ class H(BaseHTTPRequestHandler):
         except TokenExpired:
             global AUTH_EXPIRED
             AUTH_EXPIRED = True
-            self._json({"error": "登录已失效，请重新登录"}, 401)
+            self._json({"error": "登录已失效，请重新登??"}, 401)
             return
         except FileNotFoundError as e:
-            self._json({"error": "未找到: %s" % e}, 404)
+            self._json({"error": "未找??: %s" % e}, 404)
             return
         except Exception as e:
             self._json({"error": "CAS 播放失败: %s" % e}, 500)
             return
-        # 302 重定向到 139 直链（播放器直连，不耗 casgen 带宽）
+        # 302 重定向到 139 直链（播放器直连，不?? casgen 带宽??
+        # 临时恢复的副本仅供播放器拉流，139 直链签名 15 分钟内有效；播完异步删掉，避免云盘堆积 TEMP_*
+        # 注意：临时文件只由 _schedule_cas_cleanup 统一调度一次删除，
+        # 不要在此再启一个 Timer，否则会被删两次（第二次静默失败，但浪费一次请求）。
         self.send_response(302)
         self.send_header("Location", url)
         self.send_header("Content-Length", "0")
         self.end_headers()
-        # 异步延迟删除临时恢复文件，保住「省空间」核心价值
+        # 异步延迟删除临时恢复文件，保住「省空间」核心价??
         self._schedule_cas_cleanup(temp_fid)
 
     def _schedule_cas_cleanup(self, temp_fid):
@@ -393,7 +265,17 @@ class H(BaseHTTPRequestHandler):
             # 任一 139 接口返回登录失效，统一提示前端重登，并标记失效
             global AUTH_EXPIRED
             AUTH_EXPIRED = True
-            self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+            self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
+        except ShareError as e:
+            # 分享类已知错误，原样回传（绝大多数业务错误走这条路）
+            self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
+        except Exception as e:
+            # 兜底：任何未预期异常都返?? JSON，绝不中断连接（否则浏览器只会看??
+            # "Failed to fetch"，且?? log_message 被置空而丢?? traceback）?
+            import traceback as _tb
+            _log_debug("unhandled", {"action": (p or {}).get("action"),
+                                     "error": repr(e), "trace": _tb.format_exc()})
+            self._json({"ok": False, "error": "服务器内部错误：" + str(e)})
 
     def route(self, p):
         global CLIENT, PROVIDER, RECORDS, AUTH_EXPIRED
@@ -408,15 +290,13 @@ class H(BaseHTTPRequestHandler):
             if prov == "139":
                 auth = (p.get("authorization") or "").strip()
                 if not auth:
-                    return self._json({"ok": False, "error": "请填写 Authorization 头"}, 400)
+                    return self._json({"ok": False, "error": "请填?? Authorization ??"}, 400)
                 try:
                     c = Yun139(auth)
-                    items, _, data = c.list_dir("root")  # 用列根目录验证账号有效
+                    items, _, data = c.list_dir("root")  # 用列根目录验证账号有??
                     CLIENT = c
                     PROVIDER = "139"
                     AUTH_EXPIRED = False
-                    _apply_msisdn(auth)
-                    monitor.mark_logged_in()  # 用户主动登录成功 → 允许调度器开始扫描
                     _save_auth(auth, "139")
                     resp = {"ok": True, "provider": "139",
                             "version": VERSION,
@@ -430,7 +310,7 @@ class H(BaseHTTPRequestHandler):
                     return self._json(resp)
                 except Exception as e:
                     _log_debug("login_error", {"error": str(e)})
-                    return self._json({"ok": False, "error": "登录/列举失败：" + str(e)}, 400)
+                    return self._json({"ok": False, "error": "登录/列举失败??" + str(e)}, 400)
             elif prov == "189":
                 return self._json({"ok": False, "error": "天翼(189)模块暂未完成，请先用移动(139)"}, 400)
             return self._json({"ok": False, "error": "未知网盘"}, 400)
@@ -439,24 +319,40 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "请先登录"}, 400)
 
         if AUTH_EXPIRED:
-            return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"}, 400)
+            return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"}, 400)
 
         if action == "list":
             parent = p.get("parent", "root")
             try:
-                items, _, data = CLIENT.list_dir(parent)
+                # 翻页：139 /file/list 单页最多 100 条，目录文件多时必须循环取完，
+                # 否则 >100 条会被截断丢失（之前只取第一页，是真实 bug）。
+                items = []
+                cursor = None
+                while True:
+                    page, cursor, _ = CLIENT.list_dir(parent, cursor)
+                    if not page:
+                        break
+                    items.extend(page)
+                    if not cursor:
+                        break
             except Exception as e:
                 import traceback; traceback.print_exc()
                 return self._json({"ok": False, "error": f"获取目录列表失败：{str(e)}"}, 500)
+            # 调试：输出前几项的原始数据到日志文件（方便排查）
+            with open("/tmp/casgen_list_debug.log", "a") as f:
+                f.write(f"\n=== list(parent={parent}) ===\n")
+                f.write(f"Items count: {len(items)}\n")
+                for i, item in enumerate(items[:5]):  # 只记录前5项
+                    f.write(f"Item {i}: type={item.get('type')}, fileType={item.get('fileType')}, contentType={item.get('contentType')}, name={item.get('name')}, fileId={item.get('fileId')}\n")
             fmt = [self._fmt(i) for i in items]
-            # 透传 139 原始 fileId，防止 _fmt 归一化在个别字段名下丢失，
-            # 前端点击展开时用 it.fileId || it._rawId 兜底，避免 parent 为空退化成根目录。
+            # 透传 139 原始 fileId，防?? _fmt 归一化在个别字段名下丢失??
+            # 前端点击展开时用 it.fileId || it._rawId 兜底，避?? parent 为空退化成根目录?
             for raw, f in zip(items, fmt):
                 f["_rawId"] = (raw.get("fileId") or raw.get("contentID") or raw.get("id")
                                or raw.get("catalogId") or raw.get("fid") or "")
-            return self._json({"ok": True, "items": fmt, "raw": data})
+            return self._json({"ok": True, "items": fmt, "count": len(items)})
 
-        # ---------- 目录选择器：在指定目录下新建子目录 ----------
+        # ---------- 目录选择器：在指定目录下新建子目?? ----------
         if action == "create_folder":
             parent = p.get("parent", "root")
             name = (p.get("name") or "").strip()
@@ -485,34 +381,19 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "version": VERSION, "results": res})
 
         # ---------- [4.0] CAS→Strm 批量生成 ----------
-        # 前端 strm.html 发送 action:"strm_create"，兼容旧版 "generate_strm"
-        if action in ("generate_strm", "strm_create"):
+        if action == "generate_strm":
             root = p.get("root", "root") or "root"
-            root_path = (p.get("rootPath") or "").strip()
-            # 旧 .strm 自动清理：勾选后删除同名旧 .strm 再重新生成（v5.0）
-            clean_old = bool(p.get("clean_old", False))
             public_url = (p.get("publicUrl") or os.environ.get("CASGEN_PUBLIC_URL", "")).strip()
-            # 路径完整性兜底校验（前端也会校验）：非根目录必须带完整 path_prefix
-            if root not in ("root", "/", "") and not root_path:
-                return self._json({"ok": False,
-                    "error": "无法获取完整目录路径（path_prefix 为空）。请在首页重新点「✔ 选定此文件夹」后再生成 .strm。"}, 400)
-            if not public_url:
-                return self._json({"ok": False,
-                    "error": "未配置 CASGEN_PUBLIC_URL（casgen 网关对外地址），无法生成 .strm"}, 400)
-            # 后台线程执行（遍历+上传很慢），返回 task id，前端轮询 /api/strm_progress 获取进度
-            task_id = _new_strm_task()
-            with _STRM_LOCK:
-                _STRM_TASKS[task_id] = {"phase": "scan", "scanned": 0, "cas_found": 0,
-                                        "done": 0, "total": 0, "name": "",
-                                        "created": 0, "skipped": 0, "failed": 0, "cleaned": 0,
-                                        "publicUrl": public_url, "error": None,
-                                        "finished": False, "results": []}
-            threading.Thread(target=_run_strm_task,
-                             args=(task_id, root, public_url, root_path, clean_old),
-                             daemon=True).start()
-            return self._json({"ok": True, "task": task_id, "version": VERSION})
+            try:
+                results = CLIENT.generate_strm(root, public_url)
+                ok_n = sum(1 for r in results if r.get("status") == "uploaded")
+                return self._json({"ok": True, "count": len(results),
+                                   "uploaded": ok_n, "results": results,
+                                   "publicUrl": public_url})
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
 
-        # ---------- [4.0] L1 本地正则重命名 ----------
+        # ---------- [4.0] L1 本地正则重命?? ----------
         if action == "rename_l1":
             root = p.get("root", "root") or "root"
             dry = bool(p.get("dryRun", False))
@@ -550,89 +431,119 @@ class H(BaseHTTPRequestHandler):
             if CLIENT is None:
                 return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
             if AUTH_EXPIRED:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
             text = (p.get("text") or "").strip()
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False,
-                                    "error": "未能从输入中解析出分享链接ID（形如 https://yun.139.com/shareweb/#/w/i/xxxx）"})
+                                    "error": "未能从输入中解析出分享链接ID（形?? https://yun.139.com/shareweb/#/w/i/xxxx??"})
             try:
-                info = get_share_info(link_id, pwd, phone=MSISDN, token=CLIENT.token)
-                files = list_all_share_files(link_id, pwd, phone=MSISDN, token=CLIENT.token, video_only=True)
+                info = get_share_info(link_id, pwd, token=CLIENT.token)
+                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
+                catalogs = list_share_catalogs(link_id, pwd, token=CLIENT.token)
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
-                return self._json({"ok": False, "error": "解析分享失败：" + str(e)})
+                return self._json({"ok": False, "error": "解析分享失败??" + str(e)})
             return self._json({
                 "ok": True, "linkID": link_id, "needPwd": bool(pwd),
                 "linkName": (info or {}).get("lkName", ""),
                 "expireTime": (info or {}).get("expireTime", ""),
                 "files": files, "count": len(files),
+                "catalogs": catalogs, "catalogCount": len(catalogs),
             })
 
         if action == "share_save":
             if CLIENT is None:
                 return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
             if AUTH_EXPIRED:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
             text = (p.get("text") or "").strip()
             target = (p.get("target") or "root").strip() or "root"
             auto_cas = bool(p.get("auto_cas", False))
-            # 删除原视频仅在「自动生成 CAS」勾选时才有意义，否则忽略
+            # 删除原视频仅在「自动生?? CAS」勾选时才有意义，否则忽??
             delete_source = bool(p.get("delete_source", False)) and auto_cas
-            # [3.0+] 勾选「转存后加入监控」：把该分享链接自动列入定时监控，
-            # 后续新增剧集自动转 CAS 并删原视频（详见 monitor.scan_one）。
-            add_to_monitor = bool(p.get("add_to_monitor", False))
-            interval = max(monitor_store.MIN_INTERVAL,
-                           int(p.get("interval_min") or monitor_store.MIN_INTERVAL))
+            # Ƿ񰴷Ŀ¼ṹļУӰӾĿ¼ת浽Ŀ¼ĬϿǰȡ
+            preserve_structure = bool(p.get("preserve_structure", True))
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
             try:
                 target_catalog = CLIENT.resolve_folder(target)
-                # 整文件夹转存：取分享根目录的顶层目录与文件，
-                # 顶层目录走 ca_path_lst（139 会连带子目录树+所有类型文件一起存，保留原结构），
-                # 顶层零散文件走 co_path_lst。这样整部《凡人修仙传》文件夹原样落到目标目录。
-                dirs, files = list_share_root_items(link_id, pwd, phone=MSISDN, token=CLIENT.token)
-                ca_paths = [f"{d['parentCatalogID']}/{d['catalogID']}" for d in dirs]
-                co_paths = [f"{f['parentCatalogID']}/{f['contentID']}" for f in files]
-                if not ca_paths and not co_paths:
-                    return self._json({"ok": False, "error": "该分享内没有任何可转存的内容"})
-                res = save_share_files(link_id, co_paths, ca_paths, target_catalog,
-                                       need_password=bool(pwd), phone=MSISDN,
-                                       token=CLIENT.token)
-                saved = len(ca_paths) + len(co_paths)
-                # 仅供前端展示：统计分享内视频总数
-                try:
-                    all_videos = list_all_share_files(link_id, pwd, phone=MSISDN, token=CLIENT.token, video_only=True)
-                    video_count = len(all_videos)
-                except Exception:
-                    video_count = None
-                cas_results = None
-                # [2.0+] 勾选「自动生成 CAS」则转存后直接对该目录生成 CAS，形成一条龙
+                files = list_all_share_files(link_id, pwd, token=CLIENT.token, video_only=True)
+                catalogs = list_share_catalogs(link_id, pwd, token=CLIENT.token)
+                # 结构保留：当分享根本有孙盹目录（当前给影规名称）时，
+                # 整䛮录彪转存??139 会自动在 target 下恢?? <>/ 并上传全部子内容??
+                preserve = preserve_structure and bool(catalogs)
+                pre_count = _count_videos(CLIENT, target_catalog)
+                # 智能增量：扫描目标目录已有的 .cas，过滤掉已生成的分享剧集，只转存/生成缺失的新剧集
+                existing = _existing_stems(CLIENT, target_catalog)
+                files_todo = [f for f in files if _fstem_of(f) not in existing]
+                skipped = len(files) - len(files_todo)
+                if preserve:
+                    saved = transfer_share_files(
+                        link_id, pwd, CLIENT.token, getattr(CLIENT, "account", ""),
+                        files_todo, target_catalog,
+                        make_folder=lambda pid, nm: CLIENT.find_or_create_folder(nm, pid),
+                        flat=False,
+                    ) if files_todo else 0
+                    res = {"structured": True, "saved": saved, "skipped_existing": skipped}
+                else:
+                    co_paths = [f["path"] for f in files_todo]
+                    if co_paths:
+                        save_share_files(link_id, co_paths, [], target_catalog,
+                                         need_password=bool(pwd), token=CLIENT.token,
+                                         phone=getattr(CLIENT, "account", ""))
+                    saved = len(co_paths)
+                    res = {"saved": saved, "skipped_existing": skipped}
+                job_id = None
+                # [2.0+] 勾选「自动生?? CAS」：转存本身立即返回结果，CAS 生成放到后台线程跑，
+                # 前端轮询进度。避免「保??+CAS」挤在同一 HTTP 请求里，把浏览器等超??/断开（表现为一??"转存??"）?
                 if auto_cas:
-                    cas_results = CLIENT.generate(target_catalog, delete_source=delete_source)
-                # [3.0+] 勾选「转存后加入监控」则建立监控基线；新增剧集自动转 CAS + 删原视频
-                monitor_info = None
-                if add_to_monitor:
+                    with CAS_JOBS_LOCK:
+                        _JOB_SEQ[0] += 1
+                        job_id = "cas_%d" % _JOB_SEQ[0]
+                        CAS_JOBS[job_id] = {"status": "running", "total": saved,
+                                            "done": 0, "results": None, "error": None,
+                                            "phase": "转存完成，正在等待 139 索引更新"}
+                    threading.Thread(target=_run_cas_job,
+                                     args=(job_id, CLIENT, target_catalog, delete_source, saved, pre_count),
+                                     daemon=True).start()
+                # [合并监控] 勾选则在转存成功后把链接加入定时监控（每小时间隔扫描新增剧集）
+                monitor_added = False
+                monitor_id = None
+                if bool(p.get("monitor", False)):
                     try:
-                        mon = monitor.add_and_baseline(link_id, pwd, target,
-                                                       auto_cas=True, delete_source=True,
-                                                       interval=interval)
-                        monitor_info = {"id": mon["id"], "status": mon.get("status"),
-                                        "lastResult": mon.get("last_result"),
-                                        "intervalMin": mon.get("interval_min")}
-                    except Exception as e:
-                        # 转存已成功，监控登记失败不应掩盖成功结果
-                        monitor_info = {"error": "已转存，但加入监控失败：" + str(e)}
+                        _mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas,
+                                                        delete_source, 60, preserve_structure)
+                        monitor_id = _mon.get("id")
+                        monitor_added = True
+                        monitor.start_scheduler()
+                    except Exception as _me:
+                        _log_debug("monitor_add_from_share", {"error": str(_me)})
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
-                return self._json({"ok": False, "error": "转存失败：" + str(e)})
+                import traceback as _tb
+                _log_debug("unhandled", {"action": "share_save", "error": repr(e), "trace": _tb.format_exc()})
+                return self._json({"ok": False, "error": "转存失败??" + str(e)})
             return self._json({"ok": True, "targetCatalog": target_catalog,
-                               "saved": saved, "videoCount": video_count, "result": res,
-                               "autoCas": auto_cas, "casResults": cas_results,
-                               "addToMonitor": add_to_monitor, "monitor": monitor_info})
+                               "saved": saved, "result": res,
+                               "autoCas": auto_cas, "jobId": job_id,
+                               "structurePreserved": preserve,
+                               "catalogCount": len(catalogs),
+                               "monitorAdded": monitor_added,
+                               "monitorId": monitor_id})
+
+        if action == "cas_job_status":
+            job_id = p.get("jobId")
+            with CAS_JOBS_LOCK:
+                job = dict(CAS_JOBS.get(job_id, {}))
+            if not job:
+                return self._json({"ok": False, "error": "任务不存在或已过??"})
+            return self._json({"ok": True, "status": job.get("status"),
+                               "phase": job.get("phase"), "total": job.get("total"), "done": job.get("done"),
+                               "results": job.get("results"), "error": job.get("error")})
 
         if action == "restore":
             sha = p.get("sha256")
@@ -652,21 +563,21 @@ class H(BaseHTTPRequestHandler):
             target = (p.get("target") or "root").strip() or "root"
             auto_cas = bool(p.get("auto_cas", True))
             delete_source = bool(p.get("delete_source", False)) and auto_cas
-            interval = max(monitor_store.MIN_INTERVAL,
-                           int(p.get("interval_min") or monitor_store.MIN_INTERVAL))
+            interval = max(60, int(p.get("interval_min") or 60))
+            preserve_structure = bool(p.get("preserve_structure", True))
             link_id, pwd = parse_share_input(text)
             if not link_id:
                 return self._json({"ok": False, "error": "未能解析出分享链接ID"})
             if CLIENT is None:
                 return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
             if AUTH_EXPIRED:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
             try:
-                mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval)
+                mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, preserve_structure)
             except ShareError as e:
-                return self._json({"ok": False, "error": "链接验证失败：" + e.message, "fatal": e.fatal})
+                return self._json({"ok": False, "error": "链接验证失败??" + e.message, "fatal": e.fatal})
             except TokenExpired:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效"})
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失??"})
             return self._json({"ok": True, "monitor": mon})
 
         if action == "monitor_list":
@@ -687,9 +598,38 @@ class H(BaseHTTPRequestHandler):
             if CLIENT is None:
                 return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
             if AUTH_EXPIRED:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登录"})
-            res = monitor.scan_one(m)
-            return self._json({"ok": True, **res})
+                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
+            # 改为后台线程执行，避免列举/转存/生成 CAS（可能十几秒）阻塞 HTTP 请求；
+            # 前端轮询 monitor_scan_status 获取阶段提示与最终结果。
+            def _scan_worker():
+                import traceback as _tb
+                with MONITOR_SCAN_LOCK:
+                    MONITOR_SCAN_JOBS[mid] = {"phase": "准备中", "status": "scanning", "msg": "", "added": 0, "total": 0}
+                def _on_phase(ph, info=None):
+                    with MONITOR_SCAN_LOCK:
+                        d = MONITOR_SCAN_JOBS.get(mid, {})
+                        d["phase"] = ph
+                        MONITOR_SCAN_JOBS[mid] = d
+                try:
+                    res = monitor.scan_one(m, on_phase=_on_phase)
+                    with MONITOR_SCAN_LOCK:
+                        MONITOR_SCAN_JOBS[mid].update({"status": "done", "phase": "完成",
+                                                       "msg": res.get("msg", ""), "added": res.get("added", 0),
+                                                       "total": res.get("total", 0), "result": res})
+                except Exception as _e:
+                    with MONITOR_SCAN_LOCK:
+                        MONITOR_SCAN_JOBS[mid].update({"status": "error", "phase": "失败",
+                                                       "error": str(_e), "trace": _tb.format_exc()})
+            threading.Thread(target=_scan_worker, daemon=True).start()
+            return self._json({"ok": True, "scanning": True})
+
+        if action == "monitor_scan_status":
+            mid = p.get("id")
+            with MONITOR_SCAN_LOCK:
+                st = dict(MONITOR_SCAN_JOBS.get(mid, {}))
+            if not st:
+                return self._json({"ok": True, "scanning": False})
+            return self._json({"ok": True, "scanning": st.get("status") == "scanning", **st})
 
         return self._json({"ok": False, "error": "未知操作"}, 400)
 
@@ -700,16 +640,26 @@ class H(BaseHTTPRequestHandler):
         # ID：兼容 139 个人云多种返回字段名（personal / personal_new / 旧版 contentID 等）
         fid = (i.get("fileId") or i.get("contentID") or i.get("id")
                or i.get("catalogId") or i.get("fid") or i.get("fileIdStr") or "")
-        # 文件夹判断：type=="folder"/"dir"，或 fileType/contentType 为数字 1（1=文件夹, 2=文件），
-        # 或显式 isFolder 标记。
-        t = i.get("type") or i.get("fileType") or i.get("contentType") or ""
+        # 文件夹判断：type=="folder"/"dir"，或 fileType/contentType 为数字 1/2（1=目录，2=文件），
+        # 或显式 isFolder 标记。额外增加对 catalogType、isDir 等常见字段的兼容。
+        t = i.get("type") or i.get("fileType") or i.get("contentType") or i.get("catalogType") or ""
         is_folder = False
         if isinstance(t, str):
-            is_folder = t.strip().lower() in ("folder", "dir")
+            is_folder = t.strip().lower() in ("folder", "dir", "directory", "catalog")
         elif isinstance(t, (int, float)):
-            is_folder = t == 1  # 1=文件夹, 2=文件
+            is_folder = t in (1, 2, 10, 20)  # 扩展可能的数字值
         if not is_folder and i.get("isFolder") is True:
             is_folder = True
+        if not is_folder and i.get("isFolder") == 1:
+            is_folder = True
+        if not is_folder and i.get("isDir") is True:
+            is_folder = True
+        if not is_folder and str(i.get("category", "")).lower() in ("folder", "directory", "catalog"):
+            is_folder = True
+        # 兜底：如果 name 以 / 结尾或者含有某些特征，也可能暗示是文件夹（保守策略）
+        if not is_folder and isinstance(i.get("name"), str):
+            if i["name"].endswith("/"):
+                is_folder = True
         return {
             "fileId": fid,
             "name": i.get("name") or i.get("fileName") or i.get("contentName") or "",
@@ -720,112 +670,45 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     global CLIENT, PROVIDER, AUTH_EXPIRED
-    # 每次启动时清空旧调试日志，避免多轮测试内容混在一起
+    # 每次启动时清空旧调试日志，避免多轮测试内容混在一??
     try:
         open(DEBUG_LOG, "w", encoding="utf-8").close()
     except Exception:
         pass
-    # ⚠️ 关键修复：HTTP 服务必须先启动并立即监听，绝不能被启动期网络调用阻塞。
-    # 旧逻辑（3.0+）在启动服务"之前"就调用 list_dir("root") 恢复登录态，
-    # 一旦部署环境（如飞牛 ARM 虚拟机）到 139 的网络慢/抖动，这次网络调用会卡住整个进程，
-    # 导致 HTTP 服务迟迟不监听 —— 用户点登录时请求一直排队，前端永远显示"登录中…"。
-    # 1.0/2.0 没有这段启动期网络调用，所以登录一直正常。
-    # 修复：先起服务并立即可用，登录态恢复改到后台线程异步做；调度器先启动但暂不扫描，
-    #       等首次登录成功后才开始，避免后台 139 流量与登录抢资源。
-    port = int(os.environ.get("PORT", "5000"))
-    # 启动期配置校验：端口合法、报告关键环境变量状态
-    if not (1 <= port <= 65535):
-        print(f"[FATAL] PORT={port} 非法（合法范围 1-65535）", file=sys.stderr)
-        sys.exit(2)
-    public_url = os.environ.get("CASGEN_PUBLIC_URL", "").strip()
-    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    # 启动即恢复持久化的登录态（3.0 模块一??
+    auth = _load_auth()
+    if auth and auth.get("token"):
+        try:
+            c = Yun139(auth["token"])
+            try:
+                c.list_dir("root")  # 轻量校验 token 是否仍有??
+                AUTH_EXPIRED = False
+            except TokenExpired:
+                AUTH_EXPIRED = True
+            except Exception:
+                # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
+                # 仍挂?? CLIENT，让后续真实接口调用去检??/触发重登
+                AUTH_EXPIRED = False
+            CLIENT = c
+            PROVIDER = auth.get("provider", "139")
+        except Exception:
+            CLIENT = None
+    # 启动分享链接监控调度??3.0 模块??/四）
     monitor.bind(sys.modules[__name__])
-    webdav.bind(lambda: CLIENT, lambda: AUTH_EXPIRED)
-    monitor.start_scheduler()  # 守护线程：先空转，登录成功后才真正扫描
+    monitor.start_scheduler()
 
-    def _restore_auth():
-        """后台线程：异步恢复登录态，绝不阻塞 HTTP 服务启动。
-        优先级：① 本地持久化 casgen_auth.json（网页手动登录） ② 环境变量 CASGEN_TOKEN
-        （HF / 容器部署用，写在 Secret/Env 里，重建不丢，最适合无人值守）。"""
-        token = None
-        try:
-            auth = _load_auth()
-            if auth and auth.get("token"):
-                token = auth["token"]
-        except Exception:
-            pass
-        if not token:
-            token = os.environ.get("CASGEN_TOKEN", "").strip()
-        if not token:
-            return
-        c = Yun139(token)
-        try:
-            c.list_dir("root")  # 轻量校验 token 是否仍有效
-            AUTH_EXPIRED = False
-        except TokenExpired:
-            # token 已过期：不挂 CLIENT，标记失效让用户主动重登
-            AUTH_EXPIRED = True
-            return
-        except Exception:
-            # 其他异常（如 139 临时网络抖动）：不轻易放弃恢复，
-            # 仍挂上 CLIENT，让后续真实接口调用去检测/触发重登
-            AUTH_EXPIRED = False
-        global CLIENT, PROVIDER
-        CLIENT = c
-        PROVIDER = "139"
-        _apply_msisdn(token)
-        monitor.mark_logged_in()  # 恢复成功 → 允许调度器开始扫描
-        # 顺手把 token 落盘（网页端刷新后也能识别已登录；HF 上易失，但本地/飞牛持久化）
-        try:
-            _save_auth(token, "139")
-        except Exception:
-            pass
-
-    threading.Thread(target=_restore_auth, daemon=True).start()
-
+    port = int(os.environ.get("PORT", "5000"))
+    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     print("=" * 50)
-    print(f"  CAS 转换服务已启动  v{VERSION}")
-    print(f"  本机浏览器打开： http://localhost:{port}")
-    print(f"  其他设备打开：   http://<本机IP>:{port}")
-    print(f"  健康检查：       http://localhost:{port}/api/health")
-    if webdav.is_enabled():
-        print(f"  WebDAV 已启用：  http://<本机IP>:{port}/dav/")
-        print(f"  WebDAV 用户：    {webdav.WEBDAV_USER}")
-        print(f"  WebDAV 根目录：  {webdav.WEBDAV_ROOT}")
-    else:
-        print("  WebDAV：        未启用（设置 CASGEN_WEBDAV_USER / CASGEN_WEBDAV_PASS 开启）")
-    if public_url:
-        print(f"  CAS 网关公网：   {public_url}/cas/<路径>")
-    else:
-        print("  ⚠️  CASGEN_PUBLIC_URL 未配置：CAS→Strm 功能将无法生成可用的 .strm")
-        print("     部署时建议设置环境变量：CASGEN_PUBLIC_URL=http://<你的IP>:" + str(port))
-    print("按 Ctrl+C 停止")
+    print("CAS 转换服务已启??")
+    print(f"  本机浏览器打开?? http://localhost:{port}")
+    print(f"  其他设备打开??   http://<本机IP>:{port}")
+    print("?? Ctrl+C 停止")
     print("=" * 50)
-    sys.stdout.flush()
-
-    # 优雅停机：SIGTERM/SIGINT → 停调度器 → 关服务（Docker stop / Ctrl+C 都走这里）
-    _stop_event = threading.Event()
-
-    def _shutdown(signum, frame):
-        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
-        print(f"\n[{sig_name}] 收到停止信号，正在优雅停机…", flush=True)
-        try:
-            monitor.stop_scheduler()  # 停监控线程（如果暴露了）
-        except Exception:
-            pass
-        # 通知 serve_forever 退出
-        threading.Thread(target=srv.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    try:
-        signal.signal(signal.SIGINT, _shutdown)
-    except Exception:
-        pass
-
     try:
         srv.serve_forever()
-    finally:
-        print("HTTP 服务已停止，再见 👋", flush=True)
+    except KeyboardInterrupt:
+        print("\n已停??")
 
 
 if __name__ == "__main__":

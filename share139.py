@@ -149,12 +149,13 @@ def get_share_info(link_id, pwd="", p_ca_id="root", start=1, end=200, phone="", 
 
 def list_all_share_files(link_id, pwd="", phone="", token=None, p_ca_id="root", video_only=True):
     """递归列出分享内所有文件，返回扁平列表：
-       [{contentID, contentName, contentSize, path, pCaID, isVideo}]
+       [{contentID, contentName, contentSize, path, pCaID, isVideo, folders}]
+    folders = 该文件在分享内的祖先文件夹名列表（如 ["剧名A","第1季"]），顶层视频为 []。
     video_only=True 时仅保留视频扩展名白名单文件（默认行为，避免误转图片/文本）。
     """
     all_files = []
 
-    def fetch(dir_id, start=1):
+    def fetch(dir_id, folder_stack, start=1):
         info = get_share_info(link_id, pwd, dir_id, start, start + 199, phone, token)
         if not info:
             return
@@ -173,55 +174,37 @@ def list_all_share_files(link_id, pwd="", phone="", token=None, p_ca_id="root", 
                 "path": path,
                 "pCaID": dir_id,
                 "isVideo": is_video,
+                "folders": list(folder_stack),
             })
         # 递归子目录
         for d in (info.get("caLst") or []):
             cid = str(d.get("catalogID") or d.get("caID") or "")
             if cid:
-                fetch(cid)
+                nm = d.get("catalogName") or d.get("caName") or d.get("name") or cid
+                fetch(cid, folder_stack + [nm])
         total = info.get("nodNum") or 0
         if start + 199 < total:
-            fetch(dir_id, start + 200)
+            fetch(dir_id, folder_stack, start + 200)
 
-    fetch(p_ca_id)
+    fetch(p_ca_id, [])
     return all_files
 
 
-def list_share_root_items(link_id, pwd="", phone="", token=None, page_size=200):
-    """返回分享根目录的【顶层】目录与文件（带分页），用于「整文件夹转存」。
-
-    139 的批量转存接口 contentInfoList 转文件、catalogInfoList 转目录，
-    转目录时会连同其整个子目录树与所有类型文件一起保存，完美保留原结构。
-    所以整文件夹转存 = 把根目录的顶层目录都放进 ca_path_lst 即可
-    （顶层零散文件再补进 co_path_lst）。
-    """
-    dirs, files = [], []
-    start = 1
-    while True:
-        info = get_share_info(link_id, pwd, "root", start, start + page_size - 1, phone, token)
-        if not info:
-            break
-        for d in (info.get("caLst") or []):
-            cid = str(d.get("catalogID") or d.get("caID") or "")
-            if cid:
-                dirs.append({
-                    "catalogID": cid,
-                    "parentCatalogID": d.get("parentCatalogID") or d.get("pCaID") or "root",
-                    "name": d.get("catalogName") or d.get("caName") or "",
-                })
-        for f in (info.get("coLst") or []):
-            fid = str(f.get("contentID") or f.get("coID") or "")
-            if fid:
-                files.append({
-                    "contentID": fid,
-                    "parentCatalogID": f.get("parentCatalogID") or f.get("pCaID") or "root",
-                    "name": f.get("contentName") or f.get("coName") or "",
-                })
-        total = info.get("nodNum") or 0
-        if start + page_size - 1 >= total:
-            break
-        start += page_size
-    return dirs, files
+def list_share_catalogs(link_id, pwd="", phone="", token=None, p_ca_id="root"):
+    """返回分享根目录下的子文件夹（影视剧）列表：[{catalogID, name, path}]。
+    path 直接采用 139 返回的 path（与文件 co_path 同一套 parentID/ID 格式），
+    作为 createOuterLinkBatchOprTask 的 catalogInfoList 元素即可整目录转存，
+    139 会自动在目标目录重建 <name>/ 并带上全部子内容。"""
+    info = get_share_info(link_id, pwd, p_ca_id, 1, 200, phone, token)
+    out = []
+    for d in (info.get("caLst") or []):
+        cid = str(d.get("catalogID") or d.get("caID") or "")
+        if not cid:
+            continue
+        name = d.get("catalogName") or d.get("caName") or d.get("name") or ""
+        path = d.get("path") or f"{p_ca_id}/{cid}"
+        out.append({"catalogID": cid, "name": name, "path": path})
+    return out
 
 
 # ============================ 转存到自己云盘 ============================
@@ -253,6 +236,116 @@ def save_share_files(link_id, co_path_lst, ca_path_lst, target_catalog_id,
         "/yun-share/richlifeApp/devapp/IBatchOprTask/createOuterLinkBatchOprTask",
         body, token=token,
     )
+
+
+
+def transfer_share_videos(link_id, pwd, token, phone, catalogs, target_catalog_id,
+                          make_folder, dry_run=False):
+    """按分享目录结构、只转存【视频】文件到用户云盘 target_catalog_id 下。
+
+    针对每个影视剧目录(catalogs 元素)在 target 下建同名子目录，递归遍历其内全部文件：
+    仅把视频扩展名白名单(VIDEO_EXT)内的文件通过 createOuterLinkBatchOprTask 转存进对应子目录，
+    非视频文件(图片/字幕/文本/压缩包等)一律跳过，绝不转存。同时保留分享内原有的嵌套子目录结构。
+
+    make_folder(parent_id, name) -> folder_id : 由调用方用已登录的 Yun139 客户端实现
+                                      （在用户云盘建/找目录）。
+    dry_run=True 时只统计将转存的视频数，不真正调用转存接口、也不建目录。
+    返回 (total_videos, actions)：total_videos=实际/将要转存的视频总数。
+    """
+    total = 0
+    actions = []
+
+    def _fetch_all(share_dir_id):
+        out = []
+        start = 1
+        while True:
+            info = get_share_info(link_id, pwd, share_dir_id, start, start + 199, phone, token)
+            if not info:
+                break
+            out.append(info)
+            nod = info.get("nodNum") or 0
+            if start + 199 >= nod:
+                break
+            start += 200
+        return out
+
+    def _walk(share_dir_id, target_dir_id):
+        nonlocal total
+        video_paths = []
+        subdirs = []
+        for info in _fetch_all(share_dir_id):
+            for f in (info.get("coLst") or []):
+                name = f.get("contentName") or f.get("coName") or ""
+                ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+                if ext not in VIDEO_EXT:
+                    continue
+                cid = f.get("contentID") or f.get("coID") or ""
+                if not cid:
+                    continue
+                path = f.get("path") or f"{share_dir_id}/{cid}"
+                video_paths.append(path)
+            for d in (info.get("caLst") or []):
+                cid = str(d.get("catalogID") or d.get("caID") or "")
+                if not cid:
+                    continue
+                nm = d.get("catalogName") or d.get("caName") or d.get("name") or cid
+                subdirs.append((cid, nm))
+        if video_paths:
+            if not dry_run:
+                save_share_files(link_id, video_paths, [], target_dir_id,
+                                 need_password=bool(pwd), phone=phone, token=token)
+            total += len(video_paths)
+            actions.append((target_dir_id, video_paths))
+        for cid, nm in subdirs:
+            child_id = folder_maker(target_dir_id, nm)
+            _walk(cid, child_id)
+
+    folder_maker = make_folder if not dry_run else (lambda p, n: p)
+    for cat in catalogs:
+        sub_id = folder_maker(target_catalog_id, cat["name"])
+        _walk(cat["catalogID"], sub_id)
+    return total, actions
+
+
+
+def transfer_share_files(link_id, pwd, token, phone, file_list, target_catalog_id,
+                         make_folder, flat=False, dry_run=False):
+    """把给定分享文件列表（每项含 folders 祖先链与 path）按原目录结构转存到用户云盘 target_catalog_id。
+
+    与 transfer_share_videos 的区别：本函数转存【调用方指定的文件列表】（用于监控增量扫描），
+    而非整目录递归。每个文件的 folders（如 ["剧名A","第1季"]）决定它在 target 下的相对路径，
+    逐层建/找目录后，把该层文件一次性转存进去。仅转存文件本身，非视频应在传入前已过滤。
+    为保险起见，扩展名不在 VIDEO_EXT 的文件会被跳过（绝不转非视频）。
+
+    flat=True 时忽略 folders，所有文件平铺进 target_catalog_id（对应一条龙里"不按结构分文件夹"）。
+    make_folder(parent_id, name) -> folder_id : 由调用方用已登录 Yun139 客户端实现。
+    dry_run=True 时不真正转存、不建目录，仅返回将转存的视频数。
+    返回实际/将要转存的视频总数。
+    """
+    groups = {}
+    for f in file_list:
+        if not isinstance(f, dict):
+            continue
+        name = f.get("contentName") or f.get("coName") or ""
+        ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+        if ext not in VIDEO_EXT:
+            continue
+        path = f.get("path") or ""
+        if not path:
+            continue
+        rel = () if flat else tuple(f.get("folders") or [])
+        groups.setdefault(rel, []).append(path)
+    folder_maker = make_folder if not dry_run else (lambda p, n: p)
+    total = 0
+    for rel, paths in groups.items():
+        cur = target_catalog_id
+        for nm in rel:
+            cur = folder_maker(cur, nm)
+        if not dry_run:
+            save_share_files(link_id, paths, [], cur,
+                             need_password=bool(pwd), phone=phone, token=token)
+        total += len(paths)
+    return total
 
 
 # ============================ 新版加密外链（备用 / 自维护） ============================
