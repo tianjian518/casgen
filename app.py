@@ -15,7 +15,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from yidong import Yun139, TokenExpired, __version__ as VERSION, VIDEO_EXT
+from yidong import Yun139, TokenExpired, __version__ as VERSION, VIDEO_EXT, CAS_EXT
 from share139 import (parse_share_input, get_share_info, list_all_share_files,
                       list_share_catalogs, save_share_files, transfer_share_files,
                       transfer_share_videos, ShareError)
@@ -81,7 +81,7 @@ def _count_videos(client, catalog):
                 continue
             name = client._name(it)
             ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-            if ext in VIDEO_EXT:
+            if ext in CAS_EXT:
                 n += 1
         return n
     except Exception:

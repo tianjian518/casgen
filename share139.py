@@ -31,9 +31,12 @@ SHARE_HEADERS = {
 }
 
 # 视频扩展名白名单（与 yidong.generate 保持一致，用于只转存视频、避免误转图片/文本）
+# 视频 / 光盘镜像扩展名白名单（与 yidong.CAS_EXT 保持一致，用于只转存视频与镜像、避免误转图片/文本）
+# 2026-08：新增 ISO / IMG / M2TS，分享里光盘镜像类也能一条龙转 CAS。
 VIDEO_EXT = {
     ".mp4", ".mkv", ".ts", ".avi", ".mov", ".flv", ".wmv",
     ".rmvb", ".mpg", ".mpeg", ".m4v", ".webm", ".3gp", ".vob",
+    ".iso", ".img", ".m2ts",
 }
 
 FATAL_CODES = {

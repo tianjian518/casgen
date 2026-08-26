@@ -30,10 +30,27 @@ VIDEO_EXT = {
     ".rmvb", ".mpg", ".mpeg", ".m4v", ".webm", ".3gp", ".vob",
 }
 
+# CAS 可转换扩展名（在视频基础上新增光盘镜像 / 磁盘映像 / 蓝光流式等）。
+# 2026-08：新增 ISO / IMG / M2TS 支持，让光盘镜像类文件也能零流量转 CAS。
+# 支持环境变量 CASGEN_EXTS 追加扩展名（逗号分隔，可带或不带点，如 "iso,img,m2ts"），
+# 无需改代码即可让任意冷门格式也能转 CAS。
+CAS_EXT = set(VIDEO_EXT)
+CAS_EXT |= {".iso", ".img", ".m2ts"}
+_env_cas_exts = os.environ.get("CASGEN_EXTS", "")
+if _env_cas_exts:
+    for _e in _env_cas_exts.split(","):
+        _e = _e.strip().lower()
+        if not _e:
+            continue
+        if not _e.startswith("."):
+            _e = "." + _e
+        CAS_EXT.add(_e)
+
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
 # 5.0：登录态持久化（localStorage 自动重登）、刷新不再丢失；修复 login_status 崩溃；监控状态保留错误
-__version__ = "6.0.0"
+# 6.1.0：新增 ISO / IMG / M2TS 等光盘镜像类转 CAS 支持；CAS_EXT 改用环境变量 CASGEN_EXTS 可追加扩展名
+__version__ = "6.1.0"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -497,23 +514,28 @@ class Yun139:
         for it in self.iter_all(root):
             if self._is_folder(it):
                 continue
+            name = self._name(it)
+            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
             sha = self.sha256_of(it)
             parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
-            if sha:
+            if sha and ext in CAS_EXT:
                 # 必须带上 sha256 与 parent：前端「恢复播放」调用 restore 时需要这两个字段，
                 # 之前 plan 只返回 name/size，导致 x.sha256 / x.parent 为 undefined，
                 # 后端 restore 因缺参直接报错——恢复播放功能是坏的。
-                ok.append({"name": self._name(it), "size": self._size(it),
+                ok.append({"name": name, "size": self._size(it),
                            "sha256": sha, "parent": parent, "fileId": self._fid(it)})
             else:
-                skip.append({"name": self._name(it)})
+                # 无 sha256（云端列表未返回哈希，转不了）或扩展名不在 CAS_EXT（非视频/非镜像），归入跳过。
+                skip.append({"name": name,
+                             "reason": "no_sha256" if not sha else "unsupported_ext"})
             if sample is None:
                 sample = it        # 留一个原始样本，供前端展示真实字段
         return ok, skip, sample
 
     def generate(self, root, delete_source=False, progress=None, on_phase=None):
-        """把原视频转成几 KB 的 .cas 文件，直接上传到 139 云盘的【原文件夹】里。
-        .cas 只是一颗种子：含原文件的 sha256 哈希。恢复时靠这颗种子做秒传，把视频在云盘复活。
+        """把原视频 / 光盘镜像（ISO/IMG 等）转成几 KB 的 .cas 文件，直接上传到 139 云盘的【原文件夹】里。
+        .cas 只是一颗种子：含原文件的 sha256 哈希。恢复时靠这颗种子做秒传，把原文件在云盘复活。
+        可转换的扩展名见模块级 CAS_EXT（视频 + ISO/IMG/M2TS，可用 CASGEN_EXTS 环境变量追加）。
         上传走完整三步（file/create → PUT → /file/complete），确保 .cas 真实显示在云盘，供光鸭版 OpenList 挂载播放。
         progress: 可选回调，每处理一个文件调用 progress(已处理数)，用于前端显示进度。
         on_phase: 可选回调，阶段切换时调用 on_phase(阶段名, 信息dict)，用于前端分步提示。
@@ -545,7 +567,7 @@ class Yun139:
             ext = ("." + nm.rsplit(".", 1)[-1].lower()) if "." in nm else ""
             if ext == ".cas":
                 continue
-            if ext in VIDEO_EXT:
+            if ext in CAS_EXT:
                 video_total += 1
         _phase("generating", total=video_total)
         for it in all_items:
@@ -558,12 +580,12 @@ class Yun139:
             if self._is_folder(it):
                 continue
             name = self._name(it)
-            # [2.0 修复] 只转视频白名单，跳过 .cas（根治后缀叠加）/ 非视频
+            # [2.0 修复] 只转 CAS_EXT 白名单（视频+光盘镜像），跳过 .cas（根治后缀叠加）/ 非支持类型
             ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
             if ext == ".cas":
                 results.append({"name": name, "status": "skipped_cas"})
                 continue
-            if ext not in VIDEO_EXT:
+            if ext not in CAS_EXT:
                 results.append({"name": name, "status": "skipped_non_video"})
                 continue
             sha = self.sha256_of(it)
