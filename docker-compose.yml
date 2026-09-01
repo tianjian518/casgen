@@ -11,4 +11,10 @@ services:
     # 覆盖镜像内 Dockerfile 默认的 7860（HF 用），让本地/飞牛监听 5000，与上面的端口映射一致
     environment:
       - PORT=5000
+      # 运行时数据目录：登录态、监控清单、调试日志都写这里。挂了卷，容器重建也不丢。
+      - CASGEN_DATA_DIR=/data
+    # 持久化：把宿主机上的 ./data 挂进容器的 /data。
+    # ⚠️ 千万不要改成挂载 /app——那会把容器里的代码整个遮住，容器直接起不来。
+    volumes:
+      - ./data:/data
     restart: unless-stopped

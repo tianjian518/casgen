@@ -15,7 +15,23 @@ import time
 import threading
 import uuid
 
-MON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "casgen_monitors.json")
+def _data_dir():
+    """运行时数据目录：可用环境变量 CASGEN_DATA_DIR 指定（如 Docker 里挂 /data），默认仍是代码目录。
+
+    之所以单独提出来：直接把宿主机目录挂到代码目录（/app）会把代码整个遮住、容器起不来，
+    因此运行时数据要能放到独立目录，只挂那个目录即可持久化。
+    """
+    d = (os.environ.get("CASGEN_DATA_DIR") or "").strip()
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+            return d
+        except Exception:
+            pass
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+MON_FILE = os.path.join(_data_dir(), "casgen_monitors.json")
 MIN_INTERVAL = 60  # 分钟，扫描间隔硬下限（用户决策：不低于 1 小时）
 _LOCK = threading.Lock()
 

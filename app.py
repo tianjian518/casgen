@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import shutil
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -37,8 +38,40 @@ MONITOR_SCAN_JOBS = {}
 MONITOR_SCAN_LOCK = threading.Lock()
 ROOT = os.path.dirname(os.path.abspath(__file__))
 INDEX = os.path.join(ROOT, "index.html")
-DEBUG_LOG = os.path.join(ROOT, "casgen_debug.log")
-AUTH_FILE = os.path.join(ROOT, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
+
+# ---- 运行时数据目录（登录态 / 监控清单 / 调试日志）----
+# 默认仍是代码目录（兼容旧行为）。但 Docker / 飞牛 部署时，若把宿主机目录挂到 /app，
+# 会把容器里的代码整个遮住导致容器起不来（can't open file 'app.py'）。
+# 因此支持用环境变量 CASGEN_DATA_DIR 指定独立数据目录（如 /data），只挂这个目录即可持久化。
+def _resolve_data_dir():
+    d = (os.environ.get("CASGEN_DATA_DIR") or "").strip()
+    if not d:
+        return ROOT
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return ROOT          # 无权限 / 只读文件系统时退回代码目录，保证程序不崩
+
+DATA_DIR = _resolve_data_dir()
+DEBUG_LOG = os.path.join(DATA_DIR, "casgen_debug.log")
+AUTH_FILE = os.path.join(DATA_DIR, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
+
+
+def _migrate_legacy_data():
+    """升级到独立数据目录后，把散落在代码目录里的旧数据搬过去，避免升级后登录态/监控清单丢失。"""
+    if os.path.abspath(DATA_DIR) == os.path.abspath(ROOT):
+        return
+    for _name in ("casgen_auth.json", "casgen_monitors.json"):
+        _old, _new = os.path.join(ROOT, _name), os.path.join(DATA_DIR, _name)
+        try:
+            if os.path.exists(_old) and not os.path.exists(_new):
+                shutil.move(_old, _new)
+        except Exception:
+            pass
+
+
+_migrate_legacy_data()
 
 
 def _log_debug(tag, obj):

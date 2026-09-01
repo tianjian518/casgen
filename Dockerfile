@@ -18,6 +18,13 @@ COPY --chown=casgen:casgen app.py yidong.py index.html utils.js README.md \
 # 这样同一份 Dockerfile 推到 HF / GitHub / Docker Hub 都不会因端口错配而崩溃。
 ENV PORT=5000
 
+# 运行时数据目录（登录态 / 监控清单 / 调试日志）：把宿主机目录挂到 /data 即可持久化。
+# ⚠️ 切记不要把宿主机目录挂到 /app——那会把容器里的代码整个遮住，容器启动即失败。
+# 不挂卷也能正常跑，只是容器重建后登录态和监控清单会丢。
+ENV CASGEN_DATA_DIR=/data
+RUN mkdir -p /data && chown casgen:casgen /data
+VOLUME ["/data"]
+
 EXPOSE 5000
 
 # 健康检查：每 30s 探活一次，5s 超时，启动预留 15s，连 3 次失败判不健康
