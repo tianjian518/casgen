@@ -510,30 +510,45 @@ class H(BaseHTTPRequestHandler):
                                      args=(job_id, CLIENT, target_catalog, delete_source, saved, pre_count),
                                      daemon=True).start()
                 # [合并监控] 勾选则在转存成功后把链接加入定时监控（每小时间隔扫描新增剧集）
+                # [BUG修复] 前端 share.html 提交的参数名是 add_to_monitor，后端原先只读 "monitor"，
+                # 两边不一致 => 用户勾了「转存后加入监控」却永远走不到这里：静默失败、监控列表空空如也，
+                # 且前端拿不到任何提示。现两种写法都认，确保勾选一定生效。
                 monitor_added = False
                 monitor_id = None
-                if bool(p.get("monitor", False)):
+                _mon_info = None
+                _want_monitor = bool(p.get("monitor", False)) or bool(p.get("add_to_monitor", False))
+                if _want_monitor:
                     try:
                         _mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas,
                                                         delete_source, 60, preserve_structure)
                         monitor_id = _mon.get("id")
                         monitor_added = True
+                        # 前端读 d.monitor.id / d.monitor.intervalMin / d.monitor.error（驼峰 intervalMin）
+                        _mon_info = {"id": _mon.get("id"),
+                                     "intervalMin": _mon.get("interval_min") or 60,
+                                     "error": None}
                         monitor.start_scheduler()
                     except Exception as _me:
                         _log_debug("monitor_add_from_share", {"error": str(_me)})
+                        _mon_info = {"error": "加入监控失败：" + str(_me)}
             except ShareError as e:
                 return self._json({"ok": False, "error": e.message, "fatal": e.fatal, "code": e.api_code})
             except Exception as e:
                 import traceback as _tb
                 _log_debug("unhandled", {"action": "share_save", "error": repr(e), "trace": _tb.format_exc()})
                 return self._json({"ok": False, "error": "转存失败??" + str(e)})
+            # [BUG修复] 前端 share.html 读的是 addToMonitor + monitor 对象（驼峰），
+            # 后端原先只返回 monitorAdded/monitorId，前端 if(d.addToMonitor && d.monitor) 永远为假
+            # => 既不会提示「已加入监控」，也不会刷新监控列表，用户以为成功了其实没加。
             return self._json({"ok": True, "targetCatalog": target_catalog,
                                "saved": saved, "result": res,
                                "autoCas": auto_cas, "jobId": job_id,
                                "structurePreserved": preserve,
                                "catalogCount": len(catalogs),
                                "monitorAdded": monitor_added,
-                               "monitorId": monitor_id})
+                               "monitorId": monitor_id,
+                               "addToMonitor": monitor_added,
+                               "monitor": _mon_info})
 
         if action == "cas_job_status":
             job_id = p.get("jobId")

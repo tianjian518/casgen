@@ -50,7 +50,12 @@ if _env_cas_exts:
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
 # 5.0：登录态持久化（localStorage 自动重登）、刷新不再丢失；修复 login_status 崩溃；监控状态保留错误
 # 6.1.0：新增 ISO / IMG / M2TS 等光盘镜像类转 CAS 支持；CAS_EXT 改用环境变量 CASGEN_EXTS 可追加扩展名
-__version__ = "6.1.0"
+# 6.1.1：修复「分享一条龙」勾选「转存后加入监控」无效——前端 share.html 传的参数名是 add_to_monitor，
+#        后端 app.py 却读 monitor，两边不一致导致加监控分支从未执行：用户勾了也毫无反应、
+#        监控列表始终为空，且因为异常与返回值都没透出，前端连一句报错都不显示（静默失败）。
+#        现后端两种写法都认；并补齐返回字段 addToMonitor 与 monitor（含 id、intervalMin），
+#        使前端能正确提示「已加入监控」并自动刷新监控列表。
+__version__ = "6.1.1"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
