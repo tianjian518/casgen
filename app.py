@@ -109,13 +109,21 @@ def _count_videos(client, catalog):
     try:
         n = 0
         root = catalog if catalog not in ("root", "/") else "root"
-        for it in client.iter_all(root, max_depth=20):
-            if client._is_folder(it):
-                continue
-            name = client._name(it)
-            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-            if ext in CAS_EXT:
-                n += 1
+        # [6.1.3 性能修复] 只数目标目录的直接子项，不做递归遍历——否则对大型云盘会发起
+        # 成百上千次接口调用，把「1 秒转存」拖成「好几分钟」（这是「转存极慢」的头号真凶）。
+        # 浏览器手动转存也不扫全盘，这里对齐。
+        cursor = None
+        while True:
+            items, cursor, _ = client.list_dir(root, cursor)
+            for it in (items or []):
+                if client._is_folder(it):
+                    continue
+                name = client._name(it)
+                ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+                if ext in CAS_EXT:
+                    n += 1
+            if not cursor:
+                break
         return n
     except Exception:
         return 0
@@ -127,15 +135,24 @@ def _existing_stems(client, target_catalog):
     从而智能跳过（不重复转存/生成）。"""
     stems = set()
     try:
-        for it in client.iter_all(target_catalog):
-            if client._is_folder(it):
-                continue
-            nm = client._name(it) or ""
-            if not nm.endswith(".cas"):
-                continue
-            video_name = nm[:-4]  # 去掉 .cas 后缀 -> '第11集.mkv'
-            if video_name:
-                stems.add(video_name)
+        # [6.1.3 性能修复] 只扫目标目录的直接子项（分页），不做递归遍历。
+        # 全量递归会把转存前准备拖成好几分钟；浏览器手动转存同样不扫全盘。
+        # 代价：跨子目录的精确去重会失效（重跑同一条龙可能重复转同一个已处理剧集），
+        # 但换来了与浏览器一致的「秒级」速度——值得。
+        cursor = None
+        while True:
+            items, cursor, _ = client.list_dir(target_catalog, cursor)
+            for it in (items or []):
+                if client._is_folder(it):
+                    continue
+                nm = client._name(it) or ""
+                if not nm.endswith(".cas"):
+                    continue
+                video_name = nm[:-4]  # 去掉 .cas 后缀 -> '第11集.mkv'
+                if video_name:
+                    stems.add(video_name)
+            if not cursor:
+                break
     except Exception as e:
         _log_debug("existing_scan", {"error": str(e)})
     return stems
@@ -144,6 +161,40 @@ def _existing_stems(client, target_catalog):
 def _fstem_of(f):
     """取分享视频的文件名（含扩展名），与 _existing_stems 的 video_name 对应，用于同名匹配。"""
     return f.get("contentName") or f.get("coName") or ""
+
+
+def _wait_transfer_landed(client, target_catalog, names, timeout=300, interval=5):
+    """转存接口返回成功 ≠ 文件已到云盘：139 的 createOuterLinkBatchOprTask 是异步任务，
+    大体积 iso/视频需后台慢慢转，文件不会立即可见（monitor 模块里也有同样的「索引延迟」处理）。
+    这里轮询目标目录(含一层子目录)，等预期文件名真正出现才认为转存成功；
+    超时则返回 False（由调用方如实报错，不再谎报成功）。只查一层，避免递归遍历整个云盘导致极慢。"""
+    import time as _t
+    want = set(n for n in names if n)
+    if not want:
+        return True
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        got = set()
+        try:
+            items, _, _ = client.list_dir(target_catalog)
+        except Exception:
+            items = []
+        for it in items:
+            if not client._is_folder(it):
+                got.add(client._name(it))
+        for it in items:
+            if client._is_folder(it):
+                try:
+                    sub, _, _ = client.list_dir(client._fid(it))
+                    for s in sub:
+                        if not client._is_folder(s):
+                            got.add(client._name(s))
+                except Exception:
+                    pass
+        if want.issubset(got):
+            return True
+        _t.sleep(interval)
+    return False
 
 
 def _run_cas_job(job_id, client, target_catalog, delete_source, expected=0, pre_count=0, on_phase=None):
@@ -530,6 +581,11 @@ class H(BaseHTTPRequestHandler):
                     saved = len(co_paths)
                     res = {"saved": saved, "skipped_existing": skipped}
                 job_id = None
+                # [6.1.3 性能修复] 不再阻塞等待文件物理落地：139 的 createOuterLinkBatchOprTask
+                # 是异步任务，提交即返回（code=0 即任务已接受），文件后台慢慢搬——与浏览器手动转存
+                # 行为完全一致（浏览器也是「提交即成功」，不傻等落地）。若接口返回失败（非 0 code），
+                # _share_post 会立即抛 ShareError，下面 except 照常报错、监控也不加。
+                # 「好几分钟」的真凶正是这步阻塞等待 + 转存前的全量云盘扫描，现已移除。
                 # [2.0+] 勾选「自动生?? CAS」：转存本身立即返回结果，CAS 生成放到后台线程跑，
                 # 前端轮询进度。避免「保??+CAS」挤在同一 HTTP 请求里，把浏览器等超??/断开（表现为一??"转存??"）?
                 if auto_cas:
