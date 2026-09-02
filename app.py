@@ -662,7 +662,7 @@ class H(BaseHTTPRequestHandler):
                         _mon_info = {"id": _mon.get("id"),
                                      "intervalMin": _mon.get("interval_min") or 60,
                                      "error": None}
-                        monitor.start_scheduler()
+                        monitor.ensure_scheduler()
                     except Exception as _me:
                         _log_debug("monitor_add_from_share", {"error": str(_me)})
                         _mon_info = {"error": "加入监控失败：" + str(_me)}
@@ -731,7 +731,10 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "monitor": mon})
 
         if action == "monitor_list":
-            return self._json({"ok": True, "monitors": monitor_store.list_all()})
+            # 查看监控列表即顺带自检调度器是否存活（看门狗入口之一）
+            monitor.ensure_scheduler()
+            return self._json({"ok": True, "monitors": monitor_store.list_all(),
+                               "scheduler": monitor.scheduler_status()})
 
         if action == "monitor_remove":
             mid = p.get("id")
@@ -761,7 +764,9 @@ class H(BaseHTTPRequestHandler):
                         d["phase"] = ph
                         MONITOR_SCAN_JOBS[mid] = d
                 try:
-                    res = monitor.scan_one(m, on_phase=_on_phase)
+                    # 与后台首扫/调度器共用扫描锁，避免并发重复转存
+                    with monitor._scan_lock:
+                        res = monitor.scan_one(m, on_phase=_on_phase)
                     with MONITOR_SCAN_LOCK:
                         MONITOR_SCAN_JOBS[mid].update({"status": "done", "phase": "完成",
                                                        "msg": res.get("msg", ""), "added": res.get("added", 0),

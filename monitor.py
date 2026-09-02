@@ -7,14 +7,20 @@
   4. 转存后等待云盘索引（INDEX_WAIT），再对目标目录生成 CAS（generate 幂等，全目录重算无害）
   5. 回写新的文件集合作为基线
 
-失效处理：
-  - 任一 139 接口抛 TokenExpired → 标记全局登录失效、暂停该监控（等待用户重登）
-  - 分享链接失效（ShareError.fatal，如过期/被取消）→ 标记该监控项 status=invalid，不再扫描
-  - 网络等非致命错误 → 标记 error，下个周期重试
+[6.1.6 调度健壮性重写] 修复「定时扫描没用 / 记录永远冻在添加时刻」的根因：
+  - 根因①：scan_one 的 6 处提前返回（未登录 / 登录失效 / TokenExpired）都**不更新 last_scan**，
+    一旦令牌个人云会话失效，每次调度都卡在第一步就 return，last_scan 永远停在添加时刻，
+    表现就是「从早到晚只有添加时那一条记录」。现改为：任何路径返回前都刷新 last_scan + last_result。
+  - 根因②：调度循环顶部 `if _expired(): continue` 在全局登录失效时**整体永久空转**，
+    且循环体未包 try/except、无看门狗，线程一旦因异常死亡就再也不会重启。
+    现改为：循环体整体受保护永不崩溃；过期时降级重试（仍刷新心跳）而非冻结；
+    新增看门狗线程，调度器意外死亡自动重启。
+  - 另：添加监控即后台全量首扫（添加即处理现有内容，而非把现有全部预先吞成基线导致「无新增」）。
 """
 
 import time
 import threading
+import traceback
 
 from share139 import (list_all_share_files, get_share_info, save_share_files,
                       transfer_share_files, ShareError, parse_share_input)
@@ -59,19 +65,29 @@ def _summary(added, total):
     return "%s 扫描：无新增（共 %d）" % (_now(), total)
 
 
+def _mark(mid, status, result, **extra):
+    """统一回写监控项状态，并强制刷新 last_scan（关键：避免记录冻结在添加时刻）。"""
+    fields = {"last_scan": _now(), "status": status, "last_result": result}
+    fields.update(extra)
+    monitor_store.update(mid, **fields)
+
+
 def scan_one(monitor, on_phase=None):
     """扫描单个监控项一次，返回结果 dict。on_phase(阶段名, 信息dict) 可选，用于分步提示。"""
+    mid = monitor.get("id")
     def _phase(ph, **kw):
         if callable(on_phase):
             try:
                 on_phase(ph, kw)
             except Exception:
                 pass
+
     client = _client()
     if client is None:
+        _mark(mid, "no_client", "尚未登录，无法扫描（请在网页登录后自动恢复）")
         return {"status": "no_client", "msg": "尚未登录"}
     if _expired():
-        monitor_store.update(monitor["id"], status="paused")
+        _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效，暂停监控"}
 
     # 1) 解析目标目录
@@ -79,10 +95,11 @@ def scan_one(monitor, on_phase=None):
     try:
         target_catalog = client.resolve_folder(monitor["target"])
     except TokenExpired:
-        monitor_store.update(monitor["id"], status="paused")
+        _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效，暂停监控"}
     except Exception as e:
-        return {"status": "error", "msg": f"目录解析失败: {str(e)}"}
+        _mark(mid, "error", "目录解析失败：" + str(e))
+        return {"status": "error", "msg": "目录解析失败: " + str(e)}
 
     # 2) 列举分享当前文件
     _phase("列举分享文件")
@@ -90,13 +107,12 @@ def scan_one(monitor, on_phase=None):
         files = list_all_share_files(monitor["link_id"], monitor["pwd"], token=client.token)
     except ShareError as e:
         if e.fatal:
-            monitor_store.update(monitor["id"], status="invalid",
-                                 last_result="链接失效：" + e.message)
+            _mark(mid, "invalid", "链接失效：" + e.message)
             return {"status": "invalid", "msg": e.message}
-        monitor_store.update(monitor["id"], status="error", last_result="列举失败：" + e.message)
+        _mark(mid, "error", "列举失败：" + e.message)
         return {"status": "error", "msg": e.message}
     except TokenExpired:
-        monitor_store.update(monitor["id"], status="paused")
+        _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效"}
 
     # 3) 差异检测：本次集合 - 上次集合 = 新增
@@ -118,13 +134,12 @@ def scan_one(monitor, on_phase=None):
                 flat=flat)
         except ShareError as e:
             if e.fatal:
-                monitor_store.update(monitor["id"], status="invalid",
-                                     last_result="转存失败(链接失效)：" + e.message)
+                _mark(mid, "invalid", "转存失败(链接失效)：" + e.message)
                 return {"status": "invalid", "msg": e.message}
-            monitor_store.update(monitor["id"], status="error", last_result="转存失败：" + e.message)
+            _mark(mid, "error", "转存失败：" + e.message)
             return {"status": "error", "msg": e.message}
         except TokenExpired:
-            monitor_store.update(monitor["id"], status="paused")
+            _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
             return {"status": "paused", "msg": "登录已失效"}
 
         # 4) 索引延迟 + 生成 CAS（重试）
@@ -139,28 +154,53 @@ def scan_one(monitor, on_phase=None):
                     last_err = ""
                     break
                 except TokenExpired:
-                    monitor_store.update(monitor["id"], status="paused")
+                    _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
                     return {"status": "paused", "msg": "登录已失效"}
                 except Exception as e:
                     last_err = str(e)
                     if attempt < GEN_RETRY - 1:
                         time.sleep(GEN_RETRY_WAIT)
             if last_err:
-                monitor_store.update(monitor["id"], status="error",
-                                     last_result="生成CAS失败：" + last_err)
+                _mark(mid, "error", "生成CAS失败：" + last_err)
 
     # 5) 回写基线（已转存的文件必须并入基线，避免下次重复转存；
     #    但 CAS 生成失败时不要掩盖错误状态——generate 是全目录幂等重算，
     #    下次扫描会对这些文件重试 CAS，无需把它们移出基线）
-    monitor_store.update(monitor["id"], last_files=list(cur_ids), last_scan=_now(),
-                         status=("error" if last_err else "ok"),
-                         last_result=(("生成CAS失败：" + last_err) if last_err else _summary(added, len(files))))
+    #    ⚠️ 必须回写 last_files（当前全部 contentID），否则下次扫描差集会再次全量转存
+    _mark(mid, ("error" if last_err else "ok"),
+          (("生成CAS失败：" + last_err) if last_err else _summary(added, len(files))),
+          last_files=list(cur_ids))
     _phase("完成", added=added)
     return {"status": ("error" if last_err else "ok"), "added": added, "total": len(files)}
 
 
+# 扫描串行性：后台首扫线程、调度器、手动「立即扫描」共用 _scan_lock，
+# 避免同一监控项并发扫描导致重复转存 / 重复生成 CAS。
+_scan_lock = threading.Lock()
+
+
+def _first_scan(mid):
+    """后台首次全量扫描：添加监控后立即调用，对分享现有内容做一次处理。
+    scan_one 跑完会自行回写基线（last_files=本次全部），实现『添加即处理现有 + 后续自动追更』。
+    首次扫描时 prev 为空 → 全部文件当新增 → 全量转存+生成CAS。"""
+    try:
+        with _scan_lock:
+            m = monitor_store.get(mid)
+            if m:
+                scan_one(m)
+    except Exception:
+        pass
+
+
 def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, preserve_structure=True):
-    """添加监控项，并立即拉一次链接建立文件基线（last_files）。"""
+    """添加监控项。
+
+    [6.1.6 修复] 不再把分享现有全部文件预先设为「已处理基线」——
+    那样会让首次扫描判定『无新增』而什么都不做（表现就是『定时扫描没用』）。
+    改为：添加后立即在后台对分享现有内容做一次全量处理（转存+生成CAS），
+    scan_one 跑完会自行回写基线，实现『添加即处理现有 + 后续自动追更』。
+    首扫在后台线程异步进行，不阻塞 HTTP 响应；调度器仍按 interval 负责后续追更。
+    """
     mon = monitor_store.add({
         "link_id": link_id, "pwd": pwd, "target": target,
         "auto_cas": auto_cas, "delete_source": delete_source,
@@ -168,71 +208,143 @@ def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, pr
     })
     client = _client()
     if client is not None and not _expired():
+        total = 0
+        link_name = ""
         try:
             files = list_all_share_files(link_id, pwd, token=client.token)
-            link_name = ""
+            total = len(files)
             try:
                 sinfo = get_share_info(link_id, pwd, "root", 1, 1,
                                        getattr(client, "account", ""), client.token)
                 link_name = (sinfo or {}).get("lkName") or ""
             except Exception:
                 pass
-            monitor_store.update(mon["id"], last_files=[f["contentID"] for f in files],
-                                 link_name=link_name,
-                                 last_scan=_now(), status="ok",
-                                 last_result="已添加，基线 %d 个视频" % len(files))
-            mon = monitor_store.get(mon["id"])
         except Exception:
-            # 基线建立失败不影响添加，下个周期再扫
             pass
+        # 仅记录分享名与总数用于展示，不再预先吞掉基线
+        monitor_store.update(mon["id"], link_name=link_name, status="pending",
+                             last_result="已添加，后台开始首扫（共 %d 个视频）" % total)
+        # 立即后台全量首扫（首次扫描 prev 为空 → 全部当新增 → 全量处理）
+        threading.Thread(target=_first_scan, args=(mon["id"],), daemon=True).start()
+    else:
+        monitor_store.update(mon["id"], status="paused",
+                             last_result="未登录/登录已失效，添加成功但暂未首扫（网页登录后自动补扫）")
     return mon
+
+
+# ===== 调度器：崩溃自愈 + 看门狗 + 过期降级（6.1.6） =====
+# 心跳：每次循环都刷新，供 UI 判断调度器是否存活（不依赖某次扫描是否更新 last_scan）
+SCHEDULER_LAST_TICK = {"t": "", "errors": 0}
+_SCHEDULER = None
+_SCHEDULER_LOCK = threading.Lock()
+_WATCHDOG = None
+
+
+def scheduler_alive():
+    return _SCHEDULER is not None and _SCHEDULER.is_alive()
+
+
+def scheduler_status():
+    """供 app.py 在 monitor_list 中返回调度器健康度，便于排查『扫描没用』。"""
+    return {
+        "alive": scheduler_alive(),
+        "last_tick": SCHEDULER_LAST_TICK.get("t", ""),
+        "errors": SCHEDULER_LAST_TICK.get("errors", 0),
+    }
+
+
+def ensure_scheduler():
+    """确保调度器线程存活；若未启动或已死则（重新）启动。看门狗与 Web 请求共用此入口。"""
+    global _SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER is None or not _SCHEDULER.is_alive():
+            _SCHEDULER = MonitorScheduler()
+            _SCHEDULER.start()
+            return True
+    return False
 
 
 class MonitorScheduler(threading.Thread):
     def __init__(self):
-        super().__init__(daemon=True)
+        super().__init__(daemon=True, name="casgen-monitor-scheduler")
         self._stop = threading.Event()
 
     def run(self):
+        """调度主循环。整体包 try/except：任何异常都不让线程崩溃退出，
+        否则扫描会永久停止（表现即『定时扫描没用』）。"""
+        global SCHEDULER_LAST_TICK
         while not self._stop.is_set():
-            time.sleep(60)
-            if _expired():
-                continue  # 全局登录失效：暂停所有监控
-            now = time.time()
-            for m in monitor_store.list_all():
-                if not m.get("enabled"):
+            try:
+                SCHEDULER_LAST_TICK["t"] = _now()
+                # 即使全局登录失效，也不冻结调度：仅降级（刷新心跳 + 慢速重试），
+                # 待用户在网页重新登录（AUTH_EXPIRED 置 False）后，下次循环即自动恢复扫描。
+                if _expired():
+                    time.sleep(60)
                     continue
-                if m.get("status") == "invalid":
-                    continue
-                iv = max(MIN_INTERVAL, int(m.get("interval_min") or MIN_INTERVAL)) * 60
-                last = m.get("last_scan")
-                if not last:
-                    due = True
-                else:
-                    try:
-                        lt = time.mktime(time.strptime(last, "%Y-%m-%d %H:%M:%S"))
-                        due = (now - lt) >= iv
-                    except Exception:
+                now = time.time()
+                for m in monitor_store.list_all():
+                    if not m.get("enabled"):
+                        continue
+                    if m.get("status") == "invalid":
+                        continue
+                    iv = max(MIN_INTERVAL, int(m.get("interval_min") or MIN_INTERVAL)) * 60
+                    last = m.get("last_scan")
+                    if not last:
                         due = True
-                if due:
-                    try:
-                        scan_one(m)
-                    except Exception as e:
+                    else:
                         try:
-                            monitor_store.update(m["id"], status="error",
-                                                 last_result="扫描异常：" + str(e))
+                            lt = time.mktime(time.strptime(last, "%Y-%m-%d %H:%M:%S"))
+                            due = (now - lt) >= iv
                         except Exception:
-                            pass
+                            due = True
+                    if due:
+                        try:
+                            # 与后台首扫 / 手动扫描共用锁，避免并发重复转存
+                            with _scan_lock:
+                                scan_one(m)
+                        except Exception as e:
+                            # 单条扫描异常不影响其他监控项，也绝不崩溃线程
+                            try:
+                                monitor_store.update(m["id"], last_scan=_now(), status="error",
+                                                     last_result="扫描异常：" + str(e))
+                            except Exception:
+                                pass
+            except Exception as e:
+                # 循环体整体异常：记录后继续，不让线程死掉
+                SCHEDULER_LAST_TICK["errors"] = SCHEDULER_LAST_TICK.get("errors", 0) + 1
+                try:
+                    print("[monitor] 调度循环异常（已自愈，继续运行）: %s" %
+                          (str(e)[:200]), flush=True)
+                    traceback.print_exc()
+                except Exception:
+                    pass
+            # 固定 60s 轮询节奏（扫描过程中的阻塞睡眠已计入，这里补足间隔）
+            time.sleep(60)
 
     def stop(self):
         self._stop.set()
 
 
-_scheduler = None
+def _watchdog_loop():
+    """看门狗：每 60s 检查调度器是否存活，意外死亡则自动重启。"""
+    while True:
+        try:
+            time.sleep(60)
+            if _SCHEDULER is None or not _SCHEDULER.is_alive():
+                try:
+                    print("[monitor] 看门狗：调度器线程已停止，自动重启", flush=True)
+                except Exception:
+                    pass
+                ensure_scheduler()
+        except Exception:
+            pass
 
 
 def start_scheduler():
-    global _scheduler
-    if _scheduler is None or not _scheduler.is_alive():
-        _scheduler = MonitorScheduler()
-        _scheduler.start()
+    """启动调度器 + 看门狗（幂等，重复调用安全）。"""
+    ensure_scheduler()
+    global _WATCHDOG
+    if _WATCHDOG is None or not _WATCHDOG.is_alive():
+        _WATCHDOG = threading.Thread(target=_watchdog_loop, daemon=True,
+                                     name="casgen-monitor-watchdog")
+        _WATCHDOG.start()
