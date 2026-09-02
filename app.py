@@ -129,6 +129,28 @@ def _count_videos(client, catalog):
         return 0
 
 
+def _count_videos_recursive(client, catalog):
+    """递归统计目标目录子树(含所有子孙目录)里的视频/光盘镜像数。
+
+    与 _count_videos 的区别：这里是递归的。CAS 后台任务需要它来判断「转存的文件
+    是否已落地」——保留目录结构时文件落在子目录里，非递归计数永远看不到，会导致
+    等待循环卡满超时、CAS 生成被无限期推迟（表现就是「勾了生成CAS却像没生效」）。
+    该扫描只在后台线程跑，不阻塞浏览器，可接受其递归成本。"""
+    try:
+        n = 0
+        root = catalog if catalog not in ("root", "/") else "root"
+        for it in client.iter_all(root, max_depth=20):
+            if client._is_folder(it):
+                continue
+            name = client._name(it) or ""
+            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+            if ext in CAS_EXT:
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 def _existing_stems(client, target_catalog):
     """收集 target_catalog 下（递归）已存在的 .cas 文件对应的视频文件名（含扩展名，如 '第11集.mkv'）。
     生成 CAS 后源视频会被删除，目标目录只剩 .cas，故以 .cas 是否存在判断某剧集是否已处理，
@@ -212,19 +234,32 @@ def _run_cas_job(job_id, client, target_catalog, delete_source, expected=0, pre_
         # 139 转存?"索引延迟"：刚保存的文件要等若干秒才出现在目录列表里?
         # 先轮询等到目录视频数达到"基线+预期新增"，或超时（最? 3 分钟）再生成?
         # 否则 generate 列到 0 个视? ? 生成 0 ? .cas（正是之?"转存成功但没生成"的原因）?
-        baseline = pre_count  # 转存前已有视频数(递归计数)，由 share_save 在转存前测量后传入
+        # 6.1.4 修复：等待循环必须用「递归」计数，否则保留目录结构时文件落在子目录里、
+        # 非递归计数永远看不到，会卡满 180s 才生成 CAS（表现=勾了生成CAS却像失效）。
+        # 基线也用递归统计目标目录子树，确保与轮询口径一致。
+        try:
+            baseline = _count_videos_recursive(client, target_catalog)
+        except Exception:
+            baseline = pre_count
         deadline = time.time() + 180
         with CAS_JOBS_LOCK:
             CAS_JOBS[job_id]["status"] = "waiting"
         _set_phase("转存完成，等待 139 索引更新")
         while time.time() < deadline:
-            cur = _count_videos(client, target_catalog)
-            # 关键：转存在后台任务启动前往往已完成，目录里可能已有这些视频?
-            # 只要"当前视频? >= 预期新增?"?"比基线多出了预期?"，就说明已就位，立即生成?
-            # 否则会一直等 baseline+expected 而永远等不到（表现为 CAS 卡死 3 分钟）?
-            if expected and cur >= baseline + expected:
-                break
-            if not expected and cur > baseline:
+            # 先快速看直接子项（扁平转存场景足够，省去递归扫描）
+            try:
+                cur = _count_videos(client, target_catalog)
+            except Exception:
+                cur = baseline
+            landed = (expected and cur >= baseline + expected) or (not expected and cur > baseline)
+            if not landed:
+                # 直接子项没变，可能是保留结构落到了子目录：递归确认一次
+                try:
+                    cur_r = _count_videos_recursive(client, target_catalog)
+                except Exception:
+                    cur_r = baseline
+                landed = (expected and cur_r >= baseline + expected) or (not expected and cur_r > baseline)
+            if landed:
                 break
             time.sleep(8)
         with CAS_JOBS_LOCK:
@@ -244,7 +279,18 @@ def _run_cas_job(job_id, client, target_catalog, delete_source, expected=0, pre_
                 _set_phase("正在删除原视频（已处理 %d 个）" % (info or {}).get("count", 0))
             elif ph == "done":
                 _set_phase("全部完成")
-        results = client.generate(target_catalog, delete_source=delete_source, progress=_prog, on_phase=_gen_phase)
+        # 6.1.4 保险：若 139 索引延迟超出等待窗口，generate 可能扫到 0 个文件而生成 0 个 CAS。
+        # 此时多等一会重试（最多 3 次），避免「转存成功却不生成 CAS」的静默失败。
+        results = None
+        for _attempt in range(4):
+            results = client.generate(target_catalog, delete_source=delete_source, progress=_prog, on_phase=_gen_phase)
+            if results:
+                break
+            if _attempt < 3:
+                _set_phase("未检测到落地文件，重试中（%d/3）" % (_attempt + 1))
+                time.sleep(20)
+        if not results:
+            _log_debug("cas_job_empty", {"job": job_id, "expected": expected})
         with CAS_JOBS_LOCK:
             CAS_JOBS[job_id].update({"status": "done", "phase": "全部完成", "results": results,
                                      "done": len(results) if results else CAS_JOBS[job_id].get("done", 0)})

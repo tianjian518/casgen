@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import threading
 
 # 视频扩展名白名单：generate 只转这些，避免误转图片/文本，并根治 .cas 后缀叠加 bug
 VIDEO_EXT = {
@@ -46,6 +47,28 @@ if _env_cas_exts:
             _e = "." + _e
         CAS_EXT.add(_e)
 
+
+# ---------- [6.1.5] 防重复生成 CAS：同一目标目录串行化 + 实时去重 ----------
+# 根因：generate 的去重只依赖「启动时一次性快照 existing」，且全程无锁。
+# 一旦同一个目标目录被并发/重复触发（手动连点、一条龙后台线程、链接监控扫描撞车），
+# 两次 generate 各自在开始时拍快照、都「没看到对方还没落地的 cas」→ 都判定不存在 → 都上传。
+# 而 upload_cas 用的是 fileRenameMode=auto_rename：139 遇到同名不会拒绝，而是另存成
+# "name (1).cas" 副本。于是并发几次就产生 2/3/4 个副本。
+# 修复：① 给同一 root 加锁，串行执行，杜绝并发快照过期；② 上传前实时查 139 是否已有同名 cas，
+#       有就跳过（兜底，连「不同 root 路径指向同一文件夹」这种刁钻情况也能挡住）；
+#       ③ upload_cas 自身再加一道「已存在即跳过」，让 139 永远没有机会用 auto_rename 造副本。
+_GEN_LOCKS = {}
+_GEN_LOCKS_GUARD = threading.Lock()
+
+
+def _gen_lock_for(root):
+    with _GEN_LOCKS_GUARD:
+        lk = _GEN_LOCKS.get(root)
+        if lk is None:
+            lk = threading.Lock()
+            _GEN_LOCKS[root] = lk
+        return lk
+
 # 版本号：每次重打包都在这里改，方便核对是否用上了最新修复
 # 2026-07-22b：修复 file/create 的 parentFileId 错用文件自身 ID（00010002）的问题
 # 5.0：登录态持久化（localStorage 自动重登）、刷新不再丢失；修复 login_status 崩溃；监控状态保留错误
@@ -59,7 +82,13 @@ if _env_cas_exts:
 #        登录态 / 监控清单 / 调试日志统一写入该目录，挂载 /data 一个目录即可持久化；
 #        旧数据（散落在代码目录里的 json）首次启动自动迁移，升级不丢登录态与监控清单。
 #        解决：Docker/飞牛部署时把宿主机目录挂到 /app 会遮住代码、容器起不来的经典踩坑。
-__version__ = "6.1.3"
+# 6.1.5：根治「同一目录重复/并发生成 CAS 产生 2~4 个副本」——generate 的去重原本只依赖启动时
+#        一次性快照，且全程无锁：手动连点 / 一条龙后台线程 / 链接监控扫描一旦并发触发，各自在启动瞬间
+#        拍快照、都以为 cas 还没生成、于是都去上传；而 upload_cas 用的是 fileRenameMode=auto_rename，
+#        139 遇到同名不会拒绝，而是另存成 "name (1).cas" 副本。修复三件套：① 同一目标目录串行锁
+#        （_gen_lock_for），杜绝并发快照过期；② 上传前实时问 139 是否已存在同名 cas，有则跳过；
+#        ③ upload_cas 自身再加「已存在即跳过」，让 139 永远没机会用 auto_rename 造副本。
+__version__ = "6.1.5"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -403,6 +432,24 @@ class Yun139:
         }
         return base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
 
+    # ---------- [6.1.5] 实时查重：parent 目录里是否已存在名为 name 的文件 ----------
+    def _cas_exists(self, parent, name):
+        """生成 CAS 前实时问 139 一次：目标目录里是不是已经有这个 cas 了。
+        用实时查询而非启动快照，才能挡住「并发/不同 root 路径指向同一文件夹」造成的漏判。"""
+        try:
+            pid = parent if parent not in ("root", "/", "") else "/"
+            cursor = None
+            while True:
+                items, cursor, _ = self.list_dir(pid, cursor)
+                for it in (items or []):
+                    if not self._is_folder(it) and self._name(it) == name:
+                        return True
+                if not cursor:
+                    break
+        except Exception:
+            pass
+        return False
+
     # ---------- 上传 cas 小文件（已对齐光鸭版 OpenList 139 驱动：file/create → PUT → /file/complete） ----------
     def upload_cas(self, cas_name, content, parent):
         """把 .cas 种子文件真实上传到 139 云盘（三步，缺一不可）：
@@ -410,6 +457,13 @@ class Yun139:
            2) PUT 内容到 uploadUrl
            3) POST /file/complete 提交完成 —— 139 必须走完这步文件才会真正显示在云盘
         """
+        # [6.1.5] 最后一道防线：若目标目录已有同名 cas，直接跳过、绝不调 /file/create，
+        # 避免 139 的 auto_rename 把同名文件另存成 "name (1).cas" 副本。
+        try:
+            if self._cas_exists(parent, cas_name):
+                return {"_file_id": None, "_exist": True, "skipped": True, "name": cas_name}
+        except Exception:
+            pass
         raw = content.encode("utf-8")
         size = len(raw)
         content_sha256 = hashlib.sha256(raw).hexdigest()
@@ -555,100 +609,118 @@ class Yun139:
                     on_phase(ph, kw)
                 except Exception:
                     pass
-        results = []
-        to_delete = []
-        processed = 0
-        # 收集目录下已有文件名（幂等用）：按"所在文件夹"分别记录，已存在同名 .cas 则跳过。
-        # 必须按目录判定，不能用全局集合——不同影视剧常有同名剧集（都叫"第5集 4K.mkv"），
-        # 全局集合会误把别的剧集目录里的 .cas 也算进来，导致本剧集视频被错判"已存在"而不生成 .cas。
-        all_items = list(self.iter_all(root))
-        existing = {}  # parent_id -> set(文件名)
-        for it in all_items:
-            if not self._is_folder(it):
-                pid = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
-                existing.setdefault(pid, set()).add(self._name(it))
-        # 统计需生成的视频总数，用于阶段提示（不处理 .cas 与非视频）
-        video_total = 0
-        for it in all_items:
-            if self._is_folder(it):
-                continue
-            nm = self._name(it)
-            ext = ("." + nm.rsplit(".", 1)[-1].lower()) if "." in nm else ""
-            if ext == ".cas":
-                continue
-            if ext in CAS_EXT:
-                video_total += 1
-        _phase("generating", total=video_total)
-        for it in all_items:
-            processed += 1
-            if callable(progress):
+        # [6.1.5] 同一目标目录串行化：避免「手动连点 / 一条龙后台线程 / 链接监控扫描」并发触发时，
+        # 各自在启动瞬间拍快照、都以为 cas 还没生成、于是都去上传，最终被 139 的 auto_rename 另存成副本。
+        _gen_lock = _gen_lock_for(root)
+        _gen_lock.acquire()
+        try:
+            results = []
+            to_delete = []
+            processed = 0
+            # 收集目录下已有文件名（幂等用）：按"所在文件夹"分别记录，已存在同名 .cas 则跳过。
+            # 必须按目录判定，不能用全局集合——不同影视剧常有同名剧集（都叫"第5集 4K.mkv"），
+            # 全局集合会误把别的剧集目录里的 .cas 也算进来，导致本剧集视频被错判"已存在"而不生成 .cas。
+            # [6.1.5] 这份快照只防「本目录内本就已有的 cas」；并发安全交给上面的 _gen_lock，
+            # 而「刚被别的线程 / 上一次跑刚落地」的 cas 由下方上传前的 _cas_exists 实时兜底。
+            all_items = list(self.iter_all(root))
+            existing = {}  # parent_id -> set(文件名)
+            for it in all_items:
+                if not self._is_folder(it):
+                    pid = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
+                    existing.setdefault(pid, set()).add(self._name(it))
+            # 统计需生成的视频总数，用于阶段提示（不处理 .cas 与非视频）
+            video_total = 0
+            for it in all_items:
+                if self._is_folder(it):
+                    continue
+                nm = self._name(it)
+                ext = ("." + nm.rsplit(".", 1)[-1].lower()) if "." in nm else ""
+                if ext == ".cas":
+                    continue
+                if ext in CAS_EXT:
+                    video_total += 1
+            _phase("generating", total=video_total)
+            for it in all_items:
+                processed += 1
+                if callable(progress):
+                    try:
+                        progress(processed)
+                    except Exception:
+                        pass
+                if self._is_folder(it):
+                    continue
+                name = self._name(it)
+                # [2.0 修复] 只转 CAS_EXT 白名单（视频+光盘镜像），跳过 .cas（根治后缀叠加）/ 非支持类型
+                ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+                if ext == ".cas":
+                    results.append({"name": name, "status": "skipped_cas"})
+                    continue
+                if ext not in CAS_EXT:
+                    results.append({"name": name, "status": "skipped_non_video"})
+                    continue
+                sha = self.sha256_of(it)
+                if not sha:
+                    results.append({"name": name, "status": "skipped_no_sha256"})
+                    continue
+                # 父目录必须是文件夹 fileId：优先用 iter_all 注入的 _parent（当前所在文件夹），
+                # 再退而求其次用 139 列表项自带的 parentFileId / parentId；最后退回 root。
+                # 注意：绝不能用 self._fid(it)（那是文件自己的 ID），否则 file/create 报 00010002。
+                parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
+                # cas 文件名 = 原文件名.cas（贴合光鸭版 OpenList 约定：靠文件名/内容还原原文件）
+                cas_name = name + ".cas"
+                # [6.1.5] 双重去重：① 启动快照里已有同名 cas → 跳过；
+                #         ② 实时问 139 一遍（upload_cas 内部还会再查一次兜底），挡住并发 / 刚落地的情况。
+                if cas_name in existing.get(parent, set()) or self._cas_exists(parent, cas_name):
+                    # CAS 已存在：跳过重新生成（幂等）。但若开启了删除原视频，
+                    # 仍要把原视频加入待删除列表——否则会出现"CAS 有了、原视频却没删"的残留。
+                    results.append({"name": cas_name, "status": "skipped_exists",
+                                    "delete_scheduled": bool(delete_source)})
+                    if delete_source:
+                        to_delete.append(self._fid(it))
+                    continue
+                content = self.build_cas(name, self._size(it), sha, it.get("contentHash", ""), parent)
                 try:
-                    progress(processed)
-                except Exception:
-                    pass
-            if self._is_folder(it):
-                continue
-            name = self._name(it)
-            # [2.0 修复] 只转 CAS_EXT 白名单（视频+光盘镜像），跳过 .cas（根治后缀叠加）/ 非支持类型
-            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-            if ext == ".cas":
-                results.append({"name": name, "status": "skipped_cas"})
-                continue
-            if ext not in CAS_EXT:
-                results.append({"name": name, "status": "skipped_non_video"})
-                continue
-            sha = self.sha256_of(it)
-            if not sha:
-                results.append({"name": name, "status": "skipped_no_sha256"})
-                continue
-            # 父目录必须是文件夹 fileId：优先用 iter_all 注入的 _parent（当前所在文件夹），
-            # 再退而求其次用 139 列表项自带的 parentFileId / parentId；最后退回 root。
-            # 注意：绝不能用 self._fid(it)（那是文件自己的 ID），否则 file/create 报 00010002。
-            parent = it.get("_parent") or it.get("parentFileId") or it.get("parentId") or root
-            # cas 文件名 = 原文件名.cas（贴合光鸭版 OpenList 约定：靠文件名/内容还原原文件）
-            cas_name = name + ".cas"
-            if cas_name in existing.get(parent, set()):
-                # CAS 已存在：跳过重新生成（幂等）。但若开启了删除原视频，
-                # 仍要把原视频加入待删除列表——否则会出现"CAS 有了、原视频却没删"的残留。
-                results.append({"name": cas_name, "status": "skipped_exists",
-                                "delete_scheduled": bool(delete_source)})
+                    up = self.upload_cas(cas_name, content, parent)
+                    if up.get("skipped"):
+                        # [6.1.5] upload_cas 内部实时查重发现已存在，直接跳过（绝不造副本）。
+                        results.append({"name": cas_name, "status": "skipped_exists",
+                                        "delete_scheduled": bool(delete_source)})
+                        if delete_source:
+                            to_delete.append(self._fid(it))
+                        continue
+                    fid = up.get("_file_id") or up.get("fileId") or (up.get("data") or {}).get("fileId")
+                    up_ok = bool(fid) and not up.get("_upload_error") and not up.get("_complete_error")
+                    status = "uploaded" if up_ok else "upload_failed"
+                    detail = {k: up.get(k) for k in (
+                        "_upload_error", "_complete_error", "_missing_upload_url",
+                        "_create_failed", "_no_data", "_exist"
+                    ) if up.get(k) is not None}
+                    err = (up.get("error") or up.get("_upload_error") or up.get("_complete_error")
+                           or up.get("message") or (up.get("data") or {}).get("message")
+                           or up.get("code"))
+                    results.append({
+                        "name": cas_name,
+                        "status": status,
+                        "sha256": sha,
+                        "size": self._size(it),
+                        "parent": parent,
+                        "fileId": fid,
+                        "verify_found": up.get("_verify_found"),
+                        "error": err,
+                        "detail": detail,
+                    })
+                except Exception as e:
+                    results.append({"name": cas_name, "status": "upload_failed", "error": str(e)})
                 if delete_source:
                     to_delete.append(self._fid(it))
-                continue
-            content = self.build_cas(name, self._size(it), sha, it.get("contentHash", ""), parent)
-            try:
-                up = self.upload_cas(cas_name, content, parent)
-                fid = up.get("_file_id") or up.get("fileId") or (up.get("data") or {}).get("fileId")
-                up_ok = bool(fid) and not up.get("_upload_error") and not up.get("_complete_error")
-                status = "uploaded" if up_ok else "upload_failed"
-                detail = {k: up.get(k) for k in (
-                    "_upload_error", "_complete_error", "_missing_upload_url",
-                    "_create_failed", "_no_data", "_exist"
-                ) if up.get(k) is not None}
-                err = (up.get("error") or up.get("_upload_error") or up.get("_complete_error")
-                       or up.get("message") or (up.get("data") or {}).get("message")
-                       or up.get("code"))
-                results.append({
-                    "name": cas_name,
-                    "status": status,
-                    "sha256": sha,
-                    "size": self._size(it),
-                    "parent": parent,
-                    "fileId": fid,
-                    "verify_found": up.get("_verify_found"),
-                    "error": err,
-                    "detail": detail,
-                })
-            except Exception as e:
-                results.append({"name": cas_name, "status": "upload_failed", "error": str(e)})
-            if delete_source:
-                to_delete.append(self._fid(it))
-        if delete_source and to_delete:
-            _phase("deleting", count=len(to_delete))
-            dresp = self.delete(to_delete)
-            results.append({"name": f"[已删除 {len(to_delete)} 个原视频]", "status": "deleted", "deletedCount": len(to_delete), "detail": dresp})
-        _phase("done", total=len(results))
-        return results
+            if delete_source and to_delete:
+                _phase("deleting", count=len(to_delete))
+                dresp = self.delete(to_delete)
+                results.append({"name": f"[已删除 {len(to_delete)} 个原视频]", "status": "deleted", "deletedCount": len(to_delete), "detail": dresp})
+            _phase("done", total=len(results))
+            return results
+        finally:
+            _gen_lock.release()
 
     # ---------- [2.0] 分享转存：目标目录解析 ----------
     def find_or_create_folder(self, name, parent="root"):

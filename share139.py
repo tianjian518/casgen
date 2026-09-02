@@ -111,7 +111,7 @@ def _share_post(path, body, token=None):
         headers["Authorization"] = t
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             resp = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
