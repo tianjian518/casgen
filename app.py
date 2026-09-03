@@ -654,8 +654,11 @@ class H(BaseHTTPRequestHandler):
                 _want_monitor = bool(p.get("monitor", False)) or bool(p.get("add_to_monitor", False))
                 if _want_monitor:
                     try:
+                        # [6.1.7] skip_first_scan=True：一条龙已经把当前内容转存+生成CAS完毕，
+                        # 这里只把链接加入监控做「后续追更」，避免监控首扫再把全部文件当新增转存一遍（=每份2副本）。
                         _mon = monitor.add_and_baseline(link_id, pwd, target, auto_cas,
-                                                        delete_source, 60, preserve_structure)
+                                                        delete_source, 60, preserve_structure,
+                                                        skip_first_scan=True)
                         monitor_id = _mon.get("id")
                         monitor_added = True
                         # 前端读 d.monitor.id / d.monitor.intervalMin / d.monitor.error（驼峰 intervalMin）
@@ -750,8 +753,11 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "监控项不存在"})
             if CLIENT is None:
                 return self._json({"ok": False, "needLogin": True, "error": "请先登录"})
-            if AUTH_EXPIRED:
-                return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
+            # [6.1.7] 不再因 AUTH_EXPIRED 提前返回——否则 scan_one 内部「过期也刷新 last_scan」
+            # 的逻辑执行不到，扫描时间会冻结（表现即「手动扫描无效」）。交由 scan_one 统一处理：
+            # 过期时它仍会刷新 last_scan 并标记 paused，UI 能看到真实状态与最新扫描时间。
+            # if AUTH_EXPIRED:
+            #     return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"})
             # 改为后台线程执行，避免列举/转存/生成 CAS（可能十几秒）阻塞 HTTP 请求；
             # 前端轮询 monitor_scan_status 获取阶段提示与最终结果。
             def _scan_worker():

@@ -72,6 +72,41 @@ def _mark(mid, status, result, **extra):
     monitor_store.update(mid, **fields)
 
 
+def _target_existing_names(client, target_catalog, preserve_structure):
+    """收集目标目录子树已存在的文件名集合（视频原名 + 去掉 .cas 后缀的名），
+    用于「云盘感知去重」：分享里算出来的「新增」文件，若云盘目标里已存在同名
+    （或同名 .cas），说明分享一条龙 / 上次扫描已处理过，跳过不再转存，根治重复副本。
+
+    [6.1.7] 专门根治：分享一条龙勾选「加入监控」后，一条龙已转存+生成CAS，监控首扫
+    却把全部文件当「新增」再转一遍 → 每一集两份副本。加上这层云盘感知，首扫会跳过
+    已存在于云盘的文件。
+
+    保留结构时文件落在子目录，必须递归（iter_all）才能看到；扁平转存时只在直接子项，
+    用 list_dir 即可（也更省调用）。"""
+    names = set()
+    try:
+        if preserve_structure:
+            for it in client.iter_all(target_catalog, max_depth=10):
+                if client._is_folder(it):
+                    continue
+                nm = client._name(it) or ""
+                names.add(nm[:-4] if nm.endswith(".cas") else nm)
+        else:
+            cursor = None
+            while True:
+                items, cursor, _ = client.list_dir(target_catalog, cursor)
+                for it in (items or []):
+                    if client._is_folder(it):
+                        continue
+                    nm = client._name(it) or ""
+                    names.add(nm[:-4] if nm.endswith(".cas") else nm)
+                if not cursor:
+                    break
+    except Exception:
+        pass
+    return names
+
+
 def scan_one(monitor, on_phase=None):
     """扫描单个监控项一次，返回结果 dict。on_phase(阶段名, 信息dict) 可选，用于分步提示。"""
     mid = monitor.get("id")
@@ -120,6 +155,18 @@ def scan_one(monitor, on_phase=None):
     cur_ids = {f["contentID"] for f in files}
     prev = set(monitor.get("last_files") or [])
     new_files = [f for f in files if f["contentID"] not in prev]
+
+    # [6.1.7] 云盘感知去重：分享里算出来的「新增」文件，若云盘目标目录里已存在同名
+    # （或同名 .cas），说明分享一条龙 / 上次扫描已处理过，跳过不再转存，根治重复副本。
+    existing_names = _target_existing_names(client, target_catalog,
+                                           monitor.get("preserve_structure", True))
+    if existing_names:
+        before = len(new_files)
+        new_files = [f for f in new_files
+                     if (f.get("contentName") or f.get("coName") or "") not in existing_names]
+        skipped = before - len(new_files)
+        if skipped:
+            _phase("跳过已存在", skipped=skipped)
 
     added = 0
     last_err = ""  # 关键修复：auto_cas 关闭或无可转存新文件时该变量不会被赋值，必须在顶部初始化，否则末尾回写基线时 UnboundLocalError 导致扫描直接 500
@@ -192,14 +239,13 @@ def _first_scan(mid):
         pass
 
 
-def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, preserve_structure=True):
+def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, preserve_structure=True, skip_first_scan=False):
     """添加监控项。
 
-    [6.1.6 修复] 不再把分享现有全部文件预先设为「已处理基线」——
-    那样会让首次扫描判定『无新增』而什么都不做（表现就是『定时扫描没用』）。
-    改为：添加后立即在后台对分享现有内容做一次全量处理（转存+生成CAS），
-    scan_one 跑完会自行回写基线，实现『添加即处理现有 + 后续自动追更』。
-    首扫在后台线程异步进行，不阻塞 HTTP 响应；调度器仍按 interval 负责后续追更。
+    [6.1.6] 添加即后台全量首扫（添加即处理现有内容 + 后续自动追更）。
+    [6.1.7] 新增 skip_first_scan：分享一条龙在转存/生成CAS已完成后才把链接加入监控，
+            此时不必再首扫转存（否则会和一条龙重复，造成每集两份副本），只把当前分享
+            文件设为基线、让监控专职「后续追更」即可。
     """
     mon = monitor_store.add({
         "link_id": link_id, "pwd": pwd, "target": target,
@@ -210,9 +256,10 @@ def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, pr
     if client is not None and not _expired():
         total = 0
         link_name = ""
+        share_files = []
         try:
-            files = list_all_share_files(link_id, pwd, token=client.token)
-            total = len(files)
+            share_files = list_all_share_files(link_id, pwd, token=client.token)
+            total = len(share_files)
             try:
                 sinfo = get_share_info(link_id, pwd, "root", 1, 1,
                                        getattr(client, "account", ""), client.token)
@@ -221,11 +268,18 @@ def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, pr
                 pass
         except Exception:
             pass
-        # 仅记录分享名与总数用于展示，不再预先吞掉基线
-        monitor_store.update(mon["id"], link_name=link_name, status="pending",
-                             last_result="已添加，后台开始首扫（共 %d 个视频）" % total)
-        # 立即后台全量首扫（首次扫描 prev 为空 → 全部当新增 → 全量处理）
-        threading.Thread(target=_first_scan, args=(mon["id"],), daemon=True).start()
+        if skip_first_scan:
+            # [6.1.7] 由分享一条龙调用：一条龙已转存+生成CAS，这里只把当前分享文件设为基线，
+            # 监控专职「后续追更」，避免首扫再把全部文件当新增转存一遍（=2 份副本）。
+            monitor_store.update(mon["id"], link_name=link_name, status="ok",
+                                 last_result="已加入监控（内容由分享一条龙处理），等待追更",
+                                 last_files=[f["contentID"] for f in share_files],
+                                 last_scan=_now())
+        else:
+            # 独立添加：立即后台全量首扫（scan_one 自带云盘感知去重，已存在的跳过）
+            monitor_store.update(mon["id"], link_name=link_name, status="pending",
+                                 last_result="已添加，后台开始首扫（共 %d 个视频）" % total)
+            threading.Thread(target=_first_scan, args=(mon["id"],), daemon=True).start()
     else:
         monitor_store.update(mon["id"], status="paused",
                              last_result="未登录/登录已失效，添加成功但暂未首扫（网页登录后自动补扫）")
@@ -276,11 +330,10 @@ class MonitorScheduler(threading.Thread):
         while not self._stop.is_set():
             try:
                 SCHEDULER_LAST_TICK["t"] = _now()
-                # 即使全局登录失效，也不冻结调度：仅降级（刷新心跳 + 慢速重试），
-                # 待用户在网页重新登录（AUTH_EXPIRED 置 False）后，下次循环即自动恢复扫描。
-                if _expired():
-                    time.sleep(60)
-                    continue
+                # [6.1.7] 不再因全局过期就整体 continue——那样 scan_one 内部「过期也刷新
+                # last_scan」的逻辑永远执行不到，扫描时间会冻结在添加时刻（表现即
+                # 「定时扫描没用 / 手动扫描也无效」）。改为让 scan_one 照常运行：过期时它
+                # 会标记 paused 并刷新 last_scan，UI 能看到真实状态，登录恢复后下次即正常。
                 now = time.time()
                 for m in monitor_store.list_all():
                     if not m.get("enabled"):
