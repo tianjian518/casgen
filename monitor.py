@@ -59,10 +59,93 @@ def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _summary(added, total):
+def _summary(added, total, missing=0):
     if added:
-        return "%s 扫描：新增 %d 个视频（共 %d），已转存并生成 CAS" % (_now(), added, total)
-    return "%s 扫描：无新增（共 %d）" % (_now(), total)
+        base = "%s 扫描：新增 %d 个视频（共 %d），已转存并生成 CAS" % (_now(), added, total)
+    else:
+        base = "%s 扫描：无新增（共 %d）" % (_now(), total)
+    if missing:
+        base += "；仍有 %d 个未落地，下轮自动重试" % missing
+    return base
+
+
+# 在途宽限：刚提交转存的任务 139 是异步搬运，文件不会立刻可见。
+# 宽限期内的文件不重复转存（防首扫/调度/手扫并发造成副本），只等它自己落地。
+PENDING_GRACE = 7200  # 秒（2 小时）
+
+
+def _list_dir_split(client, parent):
+    """列一个目录，返回 (文件名的 set, {文件夹名: folderID}, ok)。
+    ok=False 表示列举出错（如登录失效/网络抖动）——调用方据此判断「无法确认」，避免误判。"""
+    files, folders = set(), {}
+    try:
+        cursor = None
+        while True:
+            items, cursor, _ = client.list_dir(parent, cursor)
+            for it in (items or []):
+                if client._is_folder(it):
+                    folders[client._name(it) or ""] = client._fid(it)
+                else:
+                    files.add(client._name(it) or "")
+            if not cursor:
+                break
+        return files, folders, True
+    except Exception:
+        return files, folders, False
+
+
+def _dest_of(f, flat):
+    """分享文件在目标云盘里的相对路径：(文件夹元组, 文件名)。
+    flat=True（不保留结构）时文件夹为空，全部平铺进目标目录。"""
+    name = f.get("contentName") or f.get("coName") or ""
+    if flat:
+        return ((), name)
+    return (tuple(f.get("folders") or []), name)
+
+
+def _target_existing_paths(client, target_catalog, dest_folders, _cache=None):
+    """返回目标云盘里已存在文件的「目标相对路径」集合：{(文件夹元组, 文件名)}，
+    以及 all_ok（是否所有目录都列举成功）。
+
+    .cas 会去掉后缀按原视频名计入（删源后只剩 .cas，也算已存在）。
+    只列 dest_folders 里关心的目录，不遍历整棵树——省接口调用。
+
+    ⚠️ [6.1.8] 必须按「目录 + 文件名」精确判定。6.1.7 用「全局文件名集合」去重是错的：
+    不同影视剧常有同名「第N集.mkv」，目标目录里只要别的剧有这些文件名，本剧新剧集
+    就会被误判成「已存在」而跳过不转存——表现就是界面显示 16 集、云盘还是 5 集。
+    """
+    if _cache is None:
+        _cache = {}
+
+    def _list(parent):
+        if parent not in _cache:
+            _cache[parent] = _list_dir_split(client, parent)
+        return _cache[parent]
+
+    existing = set()
+    all_ok = True
+    for folders in dest_folders:
+        cur = target_catalog
+        ok = True
+        for nm in folders:
+            _, sub, sub_ok = _list(cur)
+            if not sub_ok:
+                ok = False
+                all_ok = False
+                break
+            if nm not in sub:
+                ok = False
+                break
+            cur = sub[nm]
+        if not ok:
+            continue
+        files, _, files_ok = _list(cur)
+        if not files_ok:
+            all_ok = False
+            continue
+        for nm in files:
+            existing.add((tuple(folders), nm[:-4] if nm.endswith(".cas") else nm))
+    return existing, all_ok
 
 
 def _mark(mid, status, result, **extra):
@@ -72,39 +155,10 @@ def _mark(mid, status, result, **extra):
     monitor_store.update(mid, **fields)
 
 
-def _target_existing_names(client, target_catalog, preserve_structure):
-    """收集目标目录子树已存在的文件名集合（视频原名 + 去掉 .cas 后缀的名），
-    用于「云盘感知去重」：分享里算出来的「新增」文件，若云盘目标里已存在同名
-    （或同名 .cas），说明分享一条龙 / 上次扫描已处理过，跳过不再转存，根治重复副本。
-
-    [6.1.7] 专门根治：分享一条龙勾选「加入监控」后，一条龙已转存+生成CAS，监控首扫
-    却把全部文件当「新增」再转一遍 → 每一集两份副本。加上这层云盘感知，首扫会跳过
-    已存在于云盘的文件。
-
-    保留结构时文件落在子目录，必须递归（iter_all）才能看到；扁平转存时只在直接子项，
-    用 list_dir 即可（也更省调用）。"""
-    names = set()
-    try:
-        if preserve_structure:
-            for it in client.iter_all(target_catalog, max_depth=10):
-                if client._is_folder(it):
-                    continue
-                nm = client._name(it) or ""
-                names.add(nm[:-4] if nm.endswith(".cas") else nm)
-        else:
-            cursor = None
-            while True:
-                items, cursor, _ = client.list_dir(target_catalog, cursor)
-                for it in (items or []):
-                    if client._is_folder(it):
-                        continue
-                    nm = client._name(it) or ""
-                    names.add(nm[:-4] if nm.endswith(".cas") else nm)
-                if not cursor:
-                    break
-    except Exception:
-        pass
-    return names
+def _target_existing_names_LEGACY(client, target_catalog, preserve_structure):
+    """[6.1.7 遗留，6.1.8 起停用] 按全局文件名去重——会把别的剧的同名剧集误判成
+    「已存在」，导致新剧集被跳过不转存（界面 16 集、云盘 5 集）。保留仅作注释参考。"""
+    return set()
 
 
 def scan_one(monitor, on_phase=None):
@@ -150,35 +204,48 @@ def scan_one(monitor, on_phase=None):
         _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效"}
 
-    # 3) 差异检测：本次集合 - 上次集合 = 新增
+    # 3) 差异检测 + 云盘实况确认
     _phase("差异检测")
-    cur_ids = {f["contentID"] for f in files}
     prev = set(monitor.get("last_files") or [])
-    new_files = [f for f in files if f["contentID"] not in prev]
+    flat = not monitor.get("preserve_structure", True)
+    now_ts = time.time()
+    pending = dict(monitor.get("pending_files") or {})
+    inflight = {cid for cid, ts in pending.items()
+                if isinstance(ts, (int, float)) and now_ts - ts < PENDING_GRACE}
 
-    # [6.1.7] 云盘感知去重：分享里算出来的「新增」文件，若云盘目标目录里已存在同名
-    # （或同名 .cas），说明分享一条龙 / 上次扫描已处理过，跳过不再转存，根治重复副本。
-    existing_names = _target_existing_names(client, target_catalog,
-                                           monitor.get("preserve_structure", True))
-    if existing_names:
-        before = len(new_files)
-        new_files = [f for f in new_files
-                     if (f.get("contentName") or f.get("coName") or "") not in existing_names]
-        skipped = before - len(new_files)
-        if skipped:
-            _phase("跳过已存在", skipped=skipped)
+    # [6.1.8] 云盘实况是唯一真相：先确认目标云盘里已有哪些（同目录同名 / 同名 .cas）。
+    # ⚠️ 旧逻辑有两个叠加缺陷，正是「界面 16 集、云盘 5 集」的根因：
+    #   ① 去重按「全局文件名」——别的剧有同名「第N集.mkv」就会把本剧新剧集误判成已存在；
+    #   ② 基线无条件写成「分享当前全部」——转存被跳过/失败后，缺失剧集永远被标记成已处理，
+    #      下轮差集为 0，再也不补（旧基线被污染后同样永不恢复）。
+    # 现改为：按「目标路径」精确去重；待转存 = 云盘里确实缺失的文件，一轮内直接补，自愈。
+    _phase("检查云盘实况")
+    dest_folders = {_dest_of(f, flat)[0] for f in files}
+    existing_paths, ex_ok = _target_existing_paths(client, target_catalog, dest_folders)
+    if ex_ok:
+        prev_confirmed = {f["contentID"] for f in files if _dest_of(f, flat) in existing_paths}
+        todo = [f for f in files if f["contentID"] not in prev_confirmed]
+    else:
+        # 云盘实况无法确认（列举出错）：退回按基线差集，避免把已有内容当缺失全量重转
+        prev_confirmed = prev
+        todo = [f for f in files if f["contentID"] not in prev]
+    waiting = [f for f in todo if f["contentID"] in inflight]
+    todo = [f for f in todo if f["contentID"] not in inflight]
+    if waiting:
+        _phase("等待在途转存落地", waiting=len(waiting))
 
     added = 0
     last_err = ""  # 关键修复：auto_cas 关闭或无可转存新文件时该变量不会被赋值，必须在顶部初始化，否则末尾回写基线时 UnboundLocalError 导致扫描直接 500
-    if new_files:
-        _phase("转存新增", added=len(new_files))
+    submitted_ids = []
+    if todo:
+        _phase("转存新增", added=len(todo))
         try:
-            flat = not monitor.get("preserve_structure", True)
             added = transfer_share_files(
                 monitor["link_id"], monitor["pwd"], client.token,
-                getattr(client, "account", ""), new_files, target_catalog,
+                getattr(client, "account", ""), todo, target_catalog,
                 make_folder=lambda pid, nm: client.find_or_create_folder(nm, pid),
                 flat=flat)
+            submitted_ids = [f["contentID"] for f in todo]
         except ShareError as e:
             if e.fatal:
                 _mark(mid, "invalid", "转存失败(链接失效)：" + e.message)
@@ -210,13 +277,30 @@ def scan_one(monitor, on_phase=None):
             if last_err:
                 _mark(mid, "error", "生成CAS失败：" + last_err)
 
-    # 5) 回写基线（已转存的文件必须并入基线，避免下次重复转存；
-    #    但 CAS 生成失败时不要掩盖错误状态——generate 是全目录幂等重算，
-    #    下次扫描会对这些文件重试 CAS，无需把它们移出基线）
-    #    ⚠️ 必须回写 last_files（当前全部 contentID），否则下次扫描差集会再次全量转存
+    # 5) 回写基线（[6.1.8] 关键修复）：基线只收录「已确认在目标云盘里真实存在」的文件，
+    #    没落地的下轮扫描自动重试；在途文件记入 pending_files 宽限管理，防止重复转存。
+    _phase("确认落地")
+    # 注意：这里必须重新列举（不能用转存前的缓存），139 转存是异步任务，要拿到最新实况
+    confirmed_paths, cf_ok = _target_existing_paths(client, target_catalog, dest_folders)
+    if cf_ok:
+        confirmed_ids = {f["contentID"] for f in files if _dest_of(f, flat) in confirmed_paths}
+        missing = len(files) - len(confirmed_ids)
+        new_pending = {cid: ts for cid, ts in pending.items() if cid not in confirmed_ids}
+        for cid in submitted_ids:
+            if cid not in confirmed_ids:
+                new_pending[cid] = now_ts
+        base_ids = confirmed_ids
+    else:
+        # 无法确认落地（列举出错）：保守回退，绝不因一次查询失败就清空基线
+        # （否则下轮会把全部文件当新增重新转存，造成大批量副本）。
+        base_ids = prev | set(submitted_ids)
+        missing = 0
+        new_pending = pending
+
     _mark(mid, ("error" if last_err else "ok"),
-          (("生成CAS失败：" + last_err) if last_err else _summary(added, len(files))),
-          last_files=list(cur_ids))
+          (("生成CAS失败：" + last_err) if last_err else _summary(added, len(files), missing)),
+          last_files=sorted(base_ids),
+          pending_files=new_pending)
     _phase("完成", added=added)
     return {"status": ("error" if last_err else "ok"), "added": added, "total": len(files)}
 

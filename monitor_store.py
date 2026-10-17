@@ -92,6 +92,7 @@ def add(spec):
         "enabled": bool(spec.get("enabled", True)),
         "last_scan": "",
         "last_files": [],   # 上次扫到的视频 contentID 集合（用于差异检测）
+        "pending_files": {},  # [6.1.8] 已提交转存但尚未确认落地的 {contentID: 提交时间戳}，宽限期内不重转
         "last_result": "",
         "status": "pending",  # pending|ok|invalid|paused|expired
         "created": _now(),
