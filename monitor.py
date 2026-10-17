@@ -330,12 +330,32 @@ def add_and_baseline(link_id, pwd, target, auto_cas, delete_source, interval, pr
     [6.1.7] 新增 skip_first_scan：分享一条龙在转存/生成CAS已完成后才把链接加入监控，
             此时不必再首扫转存（否则会和一条龙重复，造成每集两份副本），只把当前分享
             文件设为基线、让监控专职「后续追更」即可。
+    [6.1.9] 同一链接重复添加时去重（monitor_store.add 判重）：已存在则只更新配置，
+            不新建记录、不重复首扫；返回值带 _existed=True 供调用方提示用户。
+            特例：已有记录但从未成功扫过（last_scan 为空）且非一条龙路径，仍触发一次首扫补齐。
     """
-    mon = monitor_store.add({
+    mon, existed = monitor_store.add({
         "link_id": link_id, "pwd": pwd, "target": target,
         "auto_cas": auto_cas, "delete_source": delete_source,
         "interval_min": interval, "preserve_structure": preserve_structure,
     })
+    if existed:
+        # [6.1.9] 重复添加：保留已有运行状态（基线/上次扫描时间/在途文件全部不动），
+        # 只把新配置写进去（monitor_store.add 已做）。绝不重复首扫——否则又和
+        # 6.1.7 的撞车一样，把云盘已有的再转一遍。
+        mon = dict(mon)
+        mon["_existed"] = True
+        if not skip_first_scan and not mon.get("last_scan"):
+            # 例外：这条监控加了却从未扫过（比如当时未登录），补一次首扫
+            client0 = _client()
+            if client0 is not None and not _expired():
+                monitor_store.update(mon["id"], status="pending",
+                                     last_result="重新添加，后台开始首扫")
+                threading.Thread(target=_first_scan, args=(mon["id"],), daemon=True).start()
+            else:
+                monitor_store.update(mon["id"], status="paused",
+                                     last_result="未登录/登录已失效，配置已更新，登录后自动补扫")
+        return mon
     client = _client()
     if client is not None and not _expired():
         total = 0

@@ -74,15 +74,36 @@ def get(mid):
 
 
 def add(spec):
-    """spec: {link_id, pwd, target, auto_cas, delete_source, interval_min, enabled}"""
+    """spec: {link_id, pwd, target, auto_cas, delete_source, interval_min, enabled}
+
+    [6.1.9] 同一链接（link_id + pwd 均相同）重复添加时去重：不新建记录，
+    改为把新配置合并进已有记录并返回 (已有记录, True)；全新添加返回 (新记录, False)。
+    调用方需按返回的 existed 决定是否提示用户、是否触发首扫。
+    """
     data = load()
     interval = int(spec.get("interval_min") or MIN_INTERVAL)
     if interval < MIN_INTERVAL:
         interval = MIN_INTERVAL
+    link_id = spec.get("link_id", "")
+    pwd = spec.get("pwd", "") or ""
+    for m in data["monitors"]:
+        if m.get("link_id") == link_id and (m.get("pwd") or "") == pwd:
+            # 已存在同一链接：只更新配置字段，运行状态（last_scan/last_files/
+            # pending_files/status/last_result）全部保留，绝不清基线。
+            m["target"] = (spec.get("target") or "root") or "root"
+            m["auto_cas"] = bool(spec.get("auto_cas", True))
+            m["preserve_structure"] = bool(spec.get("preserve_structure", True))
+            m["interval_min"] = interval
+            m["enabled"] = bool(spec.get("enabled", True))
+            m["delete_source"] = bool(spec.get("delete_source", False)) and m["auto_cas"]
+            if spec.get("link_name"):
+                m["link_name"] = spec.get("link_name")
+            save(data)
+            return m, True
     mon = {
         "id": uuid.uuid4().hex[:12],
-        "link_id": spec.get("link_id", ""),
-        "pwd": spec.get("pwd", ""),
+        "link_id": link_id,
+        "pwd": pwd,
         "link_name": spec.get("link_name", ""),
         "target": (spec.get("target") or "root") or "root",
         "auto_cas": bool(spec.get("auto_cas", True)),
@@ -99,7 +120,7 @@ def add(spec):
     }
     data["monitors"].append(mon)
     save(data)
-    return mon
+    return mon, False
 
 
 def remove(mid):

@@ -94,7 +94,6 @@
   <h3>选择网盘并登录</h3>
   <div class="row">
     <label><input type="radio" name="prov" value="139" checked> 移动云盘 (139)</label>
-    <label><input type="radio" name="prov" value="189" disabled> 天翼云盘 (189) <span class="muted">（暂未完成）</span></label>
   </div>
   <label>Authorization 头（从浏览器抓包复制，见 README）</label>
   <textarea id="auth" rows="3" placeholder="Bearer xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></textarea>
@@ -509,7 +508,11 @@ document.getElementById("monAddBtn").onclick = async () => {
     if (!r.ok){ msg.innerHTML = '<span class="err">添加失败：'+esc(r.error||"未知")+'</span>'; return; }
     const m = r.monitor || {};
     const cnt = (m.last_files || []).length;
-    msg.innerHTML = '<span class="ok">已添加监控：<b>'+esc(m.link_name || m.link_id)+'</b>（基线 '+cnt+' 个视频，后续新增自动追更）</span>';
+    if (r.existed){
+      msg.innerHTML = '<span class="ok">该链接已在监控中，已更新配置（<b>'+esc(m.link_name || m.link_id)+'</b>，基线 '+cnt+' 个视频，未重复添加）</span>';
+    } else {
+      msg.innerHTML = '<span class="ok">已添加监控：<b>'+esc(m.link_name || m.link_id)+'</b>（基线 '+cnt+' 个视频，后续新增自动追更）</span>';
+    }
     document.getElementById("monText").value = "";
     loadMonitors();
   } catch(e){ msg.innerHTML = '<span class="err">请求出错：'+esc(e)+'</span>'; }

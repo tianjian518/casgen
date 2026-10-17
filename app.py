@@ -23,7 +23,6 @@ from share139 import (parse_share_input, get_share_info, list_all_share_files,
 import monitor
 import monitor_store
 import rename
-# from tianyi import Tianyi189  # 天翼(189)模块暂未完成
 
 CLIENT = None
 PROVIDER = None
@@ -440,9 +439,7 @@ class H(BaseHTTPRequestHandler):
                     return self._json(resp)
                 except Exception as e:
                     _log_debug("login_error", {"error": str(e)})
-                    return self._json({"ok": False, "error": "登录/列举失败??" + str(e)}, 400)
-            elif prov == "189":
-                return self._json({"ok": False, "error": "天翼(189)模块暂未完成，请先用移动(139)"}, 400)
+                    return self._json({"ok": False, "error": "登录/列举失败: " + str(e)}, 400)
             return self._json({"ok": False, "error": "未知网盘"}, 400)
 
         if CLIENT is None:
@@ -731,7 +728,12 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "链接验证失败??" + e.message, "fatal": e.fatal})
             except TokenExpired:
                 return self._json({"ok": False, "needLogin": True, "error": "登录已失??"})
-            return self._json({"ok": True, "monitor": mon})
+            # [6.1.9] 同一链接重复添加去重：命中已有监控时只更新配置，提示用户未重复添加
+            existed = bool(mon.get("_existed"))
+            if existed:
+                mon = {k: v for k, v in mon.items() if not k.startswith("_")}
+            return self._json({"ok": True, "monitor": mon, "existed": existed,
+                               "message": "该链接已在监控中，已更新配置（未重复添加）" if existed else ""})
 
         if action == "monitor_list":
             # 查看监控列表即顺带自检调度器是否存活（看门狗入口之一）
