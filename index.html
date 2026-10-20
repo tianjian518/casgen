@@ -439,10 +439,11 @@ function fmtSize(n){
 }
 
 // [3.0] 链接监控版块：拉取并渲染监控列表（之前前端未接线，导致版块空白看不到记录）
-const MON_STATUS_TEXT = { pending:"待扫描", ok:"正常", invalid:"链接失效", paused:"已暂停", error:"异常" };
+// net_error：网络瞬断（DNS/断网），系统会自动重试，不是故障，故用 warn 色而非红色
+const MON_STATUS_TEXT = { pending:"待扫描", ok:"正常", invalid:"链接失效", paused:"已暂停", error:"异常", net_error:"网络重试中" };
 function monStatusBadge(st){
   const txt = MON_STATUS_TEXT[st] || st || "未知";
-  const cls = (st==="ok") ? "ok" : (st==="error"||st==="invalid") ? "err" : (st==="paused") ? "warn" : "muted";
+  const cls = (st==="ok") ? "ok" : (st==="error"||st==="invalid") ? "err" : (st==="paused"||st==="net_error") ? "warn" : "muted";
   return '<span class="'+cls+'">'+esc(txt)+'</span>';
 }
 async function loadMonitors(){

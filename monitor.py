@@ -24,7 +24,7 @@ import traceback
 
 from share139 import (list_all_share_files, get_share_info, save_share_files,
                       transfer_share_files, ShareError, parse_share_input)
-from yidong import TokenExpired
+from yidong import TokenExpired, NetworkError, is_network_error
 import monitor_store
 from monitor_store import MIN_INTERVAL
 
@@ -152,7 +152,38 @@ def _mark(mid, status, result, **extra):
     """统一回写监控项状态，并强制刷新 last_scan（关键：避免记录冻结在添加时刻）。"""
     fields = {"last_scan": _now(), "status": status, "last_result": result}
     fields.update(extra)
+    # 扫描成功即清零连续失败计数（无论此前是网络问题还是业务错误）
+    if status in ("ok", "invalid", "paused", "no_client"):
+        fields.setdefault("fail_count", 0)
     monitor_store.update(mid, **fields)
+
+
+# 连续失败多少次后把状态从 net_error 升级为 error（避免网络长期不通时界面一直显示「正常」）
+NET_ERR_ESCALATE = 6
+# 处于异常状态时的快速重试间隔（秒）：比正常扫描间隔短，网络恢复后尽快自动补扫
+NET_ERR_RETRY_SEC = 300
+
+
+def _net_or_error(mid, prefix, e):
+    """[8.0.1] 区分「网络瞬断」与「真实故障」，返回统一结果 dict。
+
+    - 网络类错误：状态记 net_error，保持 enabled、下轮照常重试，连续 6 次（约 6 小时）
+      仍不通才升级为 error 提示用户排查网络；期间界面显示为「网络重试中」而非红色故障。
+    - 业务类错误：维持原逻辑记 error。
+    这样无论在 Windows 本机、Linux 服务器、Docker 容器还是群晖等环境，
+    DNS 抖动/出网抖动都只会「自动重试」，不会把用户工作量甩到手动重扫上。
+    """
+    msg = str(e)
+    if isinstance(e, NetworkError) or is_network_error(e):
+        m = monitor_store.get(mid) or {}
+        cnt = int(m.get("fail_count") or 0) + 1
+        if cnt >= NET_ERR_ESCALATE:
+            _mark(mid, "error", "网络持续异常（已重试 %d 次）：%s" % (cnt, msg), fail_count=cnt)
+            return {"status": "error", "msg": "网络持续异常: " + msg, "network": True}
+        _mark(mid, "net_error", "网络异常，下轮自动重试（第 %d 次）：%s" % (cnt, msg), fail_count=cnt)
+        return {"status": "net_error", "msg": msg, "network": True}
+    _mark(mid, "error", prefix + "：" + msg)
+    return {"status": "error", "msg": prefix + ": " + msg}
 
 
 def _target_existing_names_LEGACY(client, target_catalog, preserve_structure):
@@ -187,8 +218,9 @@ def scan_one(monitor, on_phase=None):
         _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效，暂停监控"}
     except Exception as e:
-        _mark(mid, "error", "目录解析失败：" + str(e))
-        return {"status": "error", "msg": "目录解析失败: " + str(e)}
+        # [8.0.1] 网络瞬断（DNS 解析失败/连接抖动）≠ 监控项故障：
+        # 任何设备/服务器/容器都可能遇到，下轮自动重试即可，不标成 error 让人手动点。
+        return _net_or_error(mid, "目录解析失败", e)
 
     # 2) 列举分享当前文件
     _phase("列举分享文件")
@@ -198,11 +230,14 @@ def scan_one(monitor, on_phase=None):
         if e.fatal:
             _mark(mid, "invalid", "链接失效：" + e.message)
             return {"status": "invalid", "msg": e.message}
-        _mark(mid, "error", "列举失败：" + e.message)
-        return {"status": "error", "msg": e.message}
+        # fatal=False 里既有真实业务错误，也有「请求 139 分享接口失败」（网络层）——
+        # 后者必须按网络瞬断处理，下轮自动重试。
+        return _net_or_error(mid, "列举失败", e)
     except TokenExpired:
         _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
         return {"status": "paused", "msg": "登录已失效"}
+    except Exception as e:
+        return _net_or_error(mid, "列举失败", e)
 
     # 3) 差异检测 + 云盘实况确认
     _phase("差异检测")
@@ -250,11 +285,14 @@ def scan_one(monitor, on_phase=None):
             if e.fatal:
                 _mark(mid, "invalid", "转存失败(链接失效)：" + e.message)
                 return {"status": "invalid", "msg": e.message}
-            _mark(mid, "error", "转存失败：" + e.message)
-            return {"status": "error", "msg": e.message}
+            return _net_or_error(mid, "转存失败", e)
         except TokenExpired:
             _mark(mid, "paused", "登录已失效，已暂停（网页重新登录后自动恢复）")
             return {"status": "paused", "msg": "登录已失效"}
+        except Exception as e:
+            # 转存中途网络中断：文件可能已部分提交，交由 pending_files 宽限机制处理，
+            # 下轮按「云盘实况」重新差集，不会重复转存也不会漏补。
+            return _net_or_error(mid, "转存失败", e)
 
         # 4) 索引延迟 + 生成 CAS（重试）
         if monitor["auto_cas"]:
@@ -275,7 +313,8 @@ def scan_one(monitor, on_phase=None):
                     if attempt < GEN_RETRY - 1:
                         time.sleep(GEN_RETRY_WAIT)
             if last_err:
-                _mark(mid, "error", "生成CAS失败：" + last_err)
+                # 生成 CAS 失败时区分网络类：网络问题下轮自愈，不刷成 error 让人手动点
+                return _net_or_error(mid, "生成CAS失败", Exception(last_err))
 
     # 5) 回写基线（[6.1.8] 关键修复）：基线只收录「已确认在目标云盘里真实存在」的文件，
     #    没落地的下轮扫描自动重试；在途文件记入 pending_files 宽限管理，防止重复转存。
@@ -445,6 +484,10 @@ class MonitorScheduler(threading.Thread):
                     if m.get("status") == "invalid":
                         continue
                     iv = max(MIN_INTERVAL, int(m.get("interval_min") or MIN_INTERVAL)) * 60
+                    # [8.0.1] 网络异常状态用更短的间隔快速重试（5 分钟），不必等满 1 小时：
+                    # 家庭宽带/Docker DNS 抖动通常几十秒就恢复，早点重试能自动补上本轮更新。
+                    if m.get("status") in ("net_error", "error"):
+                        iv = min(iv, NET_ERR_RETRY_SEC)
                     last = m.get("last_scan")
                     if not last:
                         due = True
@@ -460,10 +503,9 @@ class MonitorScheduler(threading.Thread):
                             with _scan_lock:
                                 scan_one(m)
                         except Exception as e:
-                            # 单条扫描异常不影响其他监控项，也绝不崩溃线程
+                            # 单条扫描异常不影响其他监控项，也绝不崩溃线程；同样区分网络类
                             try:
-                                monitor_store.update(m["id"], last_scan=_now(), status="error",
-                                                     last_result="扫描异常：" + str(e))
+                                _net_or_error(m["id"], "扫描异常", e)
                             except Exception:
                                 pass
             except Exception as e:

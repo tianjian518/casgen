@@ -115,7 +115,8 @@ def add(spec):
         "last_files": [],   # 上次扫到的视频 contentID 集合（用于差异检测）
         "pending_files": {},  # [6.1.8] 已提交转存但尚未确认落地的 {contentID: 提交时间戳}，宽限期内不重转
         "last_result": "",
-        "status": "pending",  # pending|ok|invalid|paused|expired
+        "status": "pending",  # pending|ok|invalid|paused|expired|net_error  [8.0.1 新增 net_error]
+        "fail_count": 0,     # [8.0.1] 连续失败次数：网络瞬断下轮自动重试，连续 6 次才升级为 error
         "created": _now(),
     }
     data["monitors"].append(mon)

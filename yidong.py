@@ -88,7 +88,7 @@ def _gen_lock_for(root):
 #        139 遇到同名不会拒绝，而是另存成 "name (1).cas" 副本。修复三件套：① 同一目标目录串行锁
 #        （_gen_lock_for），杜绝并发快照过期；② 上传前实时问 139 是否已存在同名 cas，有则跳过；
 #        ③ upload_cas 自身再加「已存在即跳过」，让 139 永远没机会用 auto_rename 造副本。
-__version__ = "8.0.0"
+__version__ = "8.0.1"
 
 
 # ============================ 签名相关（来自 52pojie 逆向） ============================
@@ -156,6 +156,111 @@ def _detect_auth_failure(data):
         raise TokenExpired("登录已失效：%s" % msg)
     if data.get("success") is False and any(kw in low for kw in _AUTH_FAIL_KW):
         raise TokenExpired("登录已失效：%s" % msg)
+
+
+# ============================ 网络瞬断判定与重试 ============================
+# [8.0.1] 跨设备/跨服务器通用：不同部署环境的网络抖动来源不同——
+#   Linux 系统 DNS 瞬断（Name or service not known）、Windows 解析器超时、
+#   Docker 容器内 DNS 上游重启（Temporary failure in name resolution）、
+#   服务器出网抖动（Connection reset / timed out）、代理断流等。
+# 这类问题都是「等几秒就好」，不该把监控项直接打成 error 让人手动点重扫，
+# 更不该在转存中途失败造成半截状态。因此：请求层统一做短退避重试，
+# 仍失败时抛出可识别的网络异常，供上层区分「网络问题」与「链接/账号问题」。
+import socket as _socket
+
+_CONN_ERRNOS = {101, 102, 103, 104, 110, 111, 113}  # Linux/通用：ECONNRESET/ECONNABORTED/ECONNREFUSED/EHOSTUNREACH/ETIMEDOUT/EHOSTDOWN
+
+
+class NetworkError(RuntimeError):
+    """网络层错误（DNS 解析失败 / 连接中断 / 超时 / 出网不通）。
+
+    与业务错误区分开的关键：这类错误重试即可，不代表链接失效或账号异常，
+    上层应保持监控项原状态、下轮自动重试，而不是标记为 error 让人手动干预。
+    """
+    pass
+
+
+def is_network_error(e):
+    """判断异常是否为「网络瞬断」类。已覆盖 urllib/http/socket/ssl 各层包装。"""
+    if isinstance(e, (NetworkError, _socket.gaierror, _socket.timeout)):
+        return True
+    seen, cur = set(), e
+    for _ in range(6):  # 逐层拆包：urllib.error.URLError.reason 里才是真正的 socket 异常
+        if cur is None or id(cur) in seen:
+            break
+        seen.add(id(cur))
+        if isinstance(cur, (_socket.gaierror, _socket.timeout, ConnectionError, TimeoutError)):
+            return True
+        errno = getattr(cur, "errno", None)
+        if isinstance(errno, int) and errno in _CONN_ERRNOS:
+            return True
+        if getattr(cur, "errno", None) in (-2, -3, 11001, 11002):  # getaddrinfo 失败码（含 Windows）
+            return True
+        low = str(cur).lower()
+        for kw in ("name or service not known", "temporary failure in name resolution",
+                   "nodename nor servname", "getaddrinfo failed", "no address associated",
+                   "connection reset", "connection aborted", "connection refused",
+                   "timed out", "timeout", "network is unreachable", "no route to host",
+                   "remote end closed", "eof occurred", "broken pipe", "ssl", "certificate"):
+            if kw in low:
+                return True
+        cur = getattr(cur, "reason", None) or getattr(cur, "__cause__", None) \
+            or getattr(cur, "__context__", None) or getattr(cur, "__original_error__", None)
+    return False
+
+
+def http_json(url, body_str, headers, timeout=30, retries=3):
+    """带退避重试的 JSON POST。
+
+    返回 (解析后的对象 或 None, 原始文本)。网络瞬断时自动重试（0.8s/2.4s/5s 递增退避，
+    总耗时可控），重试用尽仍未通则抛 NetworkError——由上层决定如何降级。
+    非 2xx 的 HTTP 响应（含 4xx/5xx）一律原样返回文本，交给业务层判错，
+    不在这里重试（业务错误重试无意义，且会放大服务端压力）。
+    """
+    body = body_str.encode("utf-8")
+    last = None
+    for attempt in range(max(1, retries)):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            try:
+                return json.loads(raw), raw
+            except Exception:
+                return None, raw
+        except urllib.error.HTTPError as e:
+            # 服务端已回话（4xx/5xx），属于业务/服务端问题，不重试
+            try:
+                raw = e.read().decode("utf-8", "replace")
+            except Exception:
+                raw = ""
+            return None, (raw or '{"_http_status": %d}' % e.code)
+        except Exception as e:
+            last = e
+            if not is_network_error(e) or attempt >= retries - 1:
+                break
+            try:
+                time.sleep(0.8 * (3 ** attempt))
+            except Exception:
+                pass
+    if last is not None and is_network_error(last):
+        raise NetworkError(_friendly_net_msg(url, last))
+    raise last if last is not None else NetworkError("请求失败：%s" % url)
+
+
+def _friendly_net_msg(url, e):
+    """把底层网络错误翻译成人能看懂的提示，便于不同环境下的用户自助判断。"""
+    host = ""
+    try:
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+    except Exception:
+        pass
+    low = str(e).lower()
+    if "name or service not known" in low or "name resolution" in low \
+            or "-2" in low or "nodename nor servname" in low or "getaddrinfo" in low:
+        return ("网络异常：域名 %s 解析失败（本机 DNS 暂时不可用，已自动重试仍失败）。"
+                "通常几十秒后自行恢复；若持续出现，请检查本机/容器的 DNS 配置。" % host)
+    return "网络异常：连接 %s 失败（%s），已自动重试仍失败，稍后会自动再次尝试。" % (host, str(e)[:160])
 
 
 # ============================ 139 云盘客户端 ============================
@@ -237,19 +342,15 @@ class Yun139:
         """发送 JSON POST，返回解析后的 dict；非 JSON 时返回 {'_raw': 文本}。"""
         body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         headers = self._sign_headers(base_headers, body_str)
-        data = body_str.encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        # [8.0.1] 走带退避重试的 http_json：DNS 瞬断/连接抖动自动重试，
+        # 重试用尽抛 NetworkError（上层据此区分「网络问题」与「链接/账号问题」）。
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8", "replace")
-        except Exception as e:
-            return {"_error": str(e)}
-        try:
-            return json.loads(raw)
-        except Exception:
+            obj, raw = http_json(url, body_str, headers, timeout=30)
+        except NetworkError as e:
+            return {"_error": str(e), "_network": True}
+        if obj is None:
             return {"_raw": raw[:2000]}
+        return obj
 
     # ---------- 路由策略：拿真实 host ----------
     def request_route_policy(self):
@@ -265,6 +366,11 @@ class Yun139:
         if isinstance(resp, dict) and resp.get("_raw") is not None:
             raise RuntimeError("路由策略返回非JSON(host=%s): %s" % (self.ROUTE_HOST, str(resp["_raw"])[:800]))
         if isinstance(resp, dict) and resp.get("_error") is not None:
+            # [8.0.1] 网络层失败抛 NetworkError（不是 RuntimeError）：让上层能识别
+            # 「本机/容器 DNS 或出网暂时不通」，保持监控项原状态并下轮自动重试，
+            # 而不是把用户吓成「目录解析失败」需要手动干预。
+            if resp.get("_network"):
+                raise NetworkError(str(resp["_error"])[:800])
             raise RuntimeError("路由策略请求出错(host=%s): %s" % (self.ROUTE_HOST, str(resp["_error"])[:800]))
         # 防御：data 可能为 null（接口常返回 {"data": null, "errorCode":..., "errorMsg":...}）
         data = resp.get("data") if isinstance(resp, dict) else None
