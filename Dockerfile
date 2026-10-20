@@ -8,8 +8,10 @@ WORKDIR /app
 # casgen 纯标准库、零 pip 依赖，复制全部运行所需文件即可。
 # 注意：app.py 会 import rename / monitor / share139 / healthcheck，必须一并复制，
 # 否则容器启动即报 ModuleNotFoundError（飞牛/抱脸都一样）。
-COPY --chown=casgen:casgen app.py yidong.py index.html utils.js README.md \
-     convert.html share.html strm.html restore.html rename.html \
+# [8.0.1] v8.0.0 起 5 个独立前端页面（convert/share/strm/restore/rename.html + utils.js）
+# 已全部内联进 index.html，这些文件已从仓库删除。此处若继续 COPY 会让 docker build
+# 报 `failed to calculate checksum ... "/convert.html": not found`，导致镜像构建失败。
+COPY --chown=casgen:casgen app.py yidong.py index.html README.md \
      rename.py monitor.py monitor_store.py share139.py healthcheck.py webdav.py ./
 
 # 端口策略（关键，避免端口错配导致容器不健康 / 一直重启）：
