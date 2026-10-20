@@ -45,6 +45,17 @@
   .folder { display:inline-block; background:#eef2ff; border:1px solid #c7d2fe; border-radius:6px; padding:6px 10px; margin:4px; cursor:pointer; }
   .folder:hover { background:#dbeafe; }
   .crumb a { color:#2563eb; cursor:pointer; }
+  /* 目录选择器：最近用过的目录 */
+  .dirhist { border-bottom:1px dashed #e5e7eb; padding-bottom:8px; margin-bottom:8px; }
+  .histwrap { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 2px; }
+  .histchip { display:inline-flex; align-items:center; gap:4px; max-width:100%;
+              background:#eef2ff; border:1px solid #c7d2fe; border-radius:999px;
+              padding:4px 10px; font-size:12px; color:#2563eb; cursor:pointer; }
+  .histchip:hover { background:#e0e7ff; }
+  .histname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:320px; }
+  .histdel { color:#9ca3af; font-weight:700; padding:0 2px; }
+  .histdel:hover { color:#dc2626; }
+  .loading { color:#6b7280; font-size:12px; }
   pre { background:#0f172a; color:#e2e8f0; padding:10px; border-radius:6px; max-height:240px; overflow:auto; font-size:12px; white-space:pre-wrap; word-break:break-all; }
   .ok { color:#16a34a; } .warn { color:#d97706; } .err { color:#dc2626; }
   .muted { color:#6b7280; font-size:12px; }
@@ -76,7 +87,7 @@
   <button id="bannerLoginBtn" style="background:#fff;color:#dc2626;border:0;border-radius:6px;padding:6px 12px;margin-left:10px;cursor:pointer;">去登录</button>
 </div>
 <header class="topbar">
-  <div class="topbar-title">🎬 移动云盘影视资源转CAS瘦身工具 <span class="ver-badge" id="ver">v5.0</span></div>
+  <div class="topbar-title">🎬 移动云盘影视资源转CAS瘦身工具 <span class="ver-badge" id="ver">v8.0</span></div>
   <div class="topbar-nav">
     <nav class="tabs">
       <button class="tab active" id="tabbtn-local" onclick="showTab('local')">我的云盘</button>
@@ -416,6 +427,16 @@ function showLogin(){
   const a=document.getElementById("auth"); if(a) a.scrollIntoView({behavior:"smooth"});
 }
 function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+// 字节数转人类可读大小（KB/MB/GB/TB）
+function fmtSize(n){
+  const v = Number(n);
+  if (!isFinite(v) || v < 0) return esc(n);
+  if (v < 1024) return v + " B";
+  const units = ["KB","MB","GB","TB","PB"];
+  let i = -1, x = v;
+  do { x = x / 1024; i++; } while (x >= 1024 && i < units.length - 1);
+  return (x < 10 ? x.toFixed(2) : (x < 100 ? x.toFixed(1) : Math.round(x))) + " " + units[i];
+}
 
 // [3.0] 链接监控版块：拉取并渲染监控列表（之前前端未接线，导致版块空白看不到记录）
 const MON_STATUS_TEXT = { pending:"待扫描", ok:"正常", invalid:"链接失效", paused:"已暂停", error:"异常" };
@@ -573,14 +594,14 @@ async function renderFolders(items){
       }
       state.currentParent = fid;
       state.path.push([fid, it.name]);
-      const r = await api({ action:"list", parent: fid });
-      dbg(r);
-      if (r && r.ok && Array.isArray(r.items)){
-        renderFolders(r.items);
-      } else {
-        alert("加载子目录失败：" + (r?.error || "未知错误"));
-        // 回滚
-        state.path.pop();
+      el.innerHTML = '<span class="loading">加载中…</span>';
+      try {
+        const items = await loadFolders(fid);
+        renderFolders(items);
+      } catch (e) {
+        alert("加载子目录失败：" + (e?.message || "未知错误"));
+        state.path.pop();   // 回滚
+        renderFolders(DIR_CACHE[state.currentParent] || []);
       }
       renderCrumb();
     };
@@ -626,7 +647,7 @@ function renderRecords(results){
   tb.innerHTML = "";
   results.filter(x=>x.status==="uploaded").forEach(x=>{
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(x.size)+'</td>';
+    tr.innerHTML = '<td>'+esc(x.name)+'</td><td>'+esc(fmtSize(x.size))+'</td>';
     const td = document.createElement("td");
     const b = document.createElement("button");
     b.textContent = "恢复";
@@ -664,7 +685,7 @@ document.getElementById("shareParseBtn").onclick = async () => {
     (r.files||[]).forEach(f=>{
       const tr=document.createElement("tr");
       const fdir = (f.folders&&f.folders.length)? f.folders.join("/") : "（顶层）";
-      tr.innerHTML='<td>'+esc(f.contentName)+'</td><td>'+esc(f.contentSize)+'</td><td>'+esc(fdir)+'</td>';
+      tr.innerHTML='<td>'+esc(f.contentName)+'</td><td>'+esc(fmtSize(f.contentSize))+'</td><td>'+esc(fdir)+'</td>';
       tb.appendChild(tr);
     });
     if(!tb.children.length) tb.innerHTML='<tr><td colspan="3" class="muted">没有视频文件</td></tr>';
@@ -784,6 +805,60 @@ async function doRename(dry){
 document.getElementById("renamePreviewBtn").onclick = () => doRename(true);
 document.getElementById("renameExecBtn").onclick = () => doRename(false);
 
+// ---------- 目录列表缓存（避免每次点开都重新翻页，139 单页 100 条很慢） ----------
+const DIR_CACHE = Object.create(null);   // parent -> items（只含文件夹）
+async function loadFolders(parent, refresh){
+  const key = String(parent || "root");
+  if (!refresh && DIR_CACHE[key]) return DIR_CACHE[key];
+  const r = await api({ action:"list", parent: key, folders_only:true, refresh: !!refresh });
+  if (r && r.ok && Array.isArray(r.items)){ DIR_CACHE[key] = r.items; return r.items; }
+  throw new Error((r && r.error) || "未知错误");
+}
+function forgetDirCache(parent){
+  if (parent) delete DIR_CACHE[String(parent)];
+  else for (const k of Object.keys(DIR_CACHE)) delete DIR_CACHE[k];
+}
+
+// ---------- 最近用过的目录（历史记录，点一下直接选中） ----------
+async function dirHistoryAdd(path, name, fileId){
+  try { await api({ action:"dir_history_add", path: path||"", name: name||"", fileId: fileId||"" }); } catch(e){}
+}
+async function renderDirHistory(box, onChoose){
+  box.innerHTML = '<span class="loading">读取历史目录…</span>';
+  const r = await api({ action:"dir_history" });
+  const items = (r && r.ok && Array.isArray(r.items)) ? r.items : [];
+  box.innerHTML = "";
+  if (!items.length){ box.style.display = "none"; return; }
+  box.style.display = "block";
+  const t = document.createElement("div");
+  t.className = "muted";
+  t.textContent = "最近用过的目录（点一下直接选中，不用再一层层点开）：";
+  box.appendChild(t);
+  const wrap = document.createElement("div"); wrap.className = "histwrap";
+  items.forEach(h=>{
+    const path = String(h.path || "");
+    const label = path || "根目录";
+    const chip = document.createElement("span"); chip.className = "histchip"; chip.title = label;
+    const nm = document.createElement("span"); nm.className = "histname"; nm.textContent = "📁 " + label;
+    const del = document.createElement("span"); del.className = "histdel"; del.textContent = "×"; del.title = "删除这条历史";
+    nm.onclick = () => onChoose(h);
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      await api({ action:"dir_history_del", path, fileId: String(h.fileId||"") });
+      renderDirHistory(box, onChoose);
+    };
+    chip.appendChild(nm); chip.appendChild(del); wrap.appendChild(chip);
+  });
+  box.appendChild(wrap);
+}
+function createHistoryBox(picker){
+  const box = document.createElement("div");
+  box.className = "dirhist";
+  box.style.display = "none";
+  picker.insertBefore(box, picker.firstChild);
+  return box;
+}
+
 // ---------- 通用目录选择器（分享转存的目标目录，像上方那样点选） ----------
 // 选中后把路径拼成字符串填回输入框；后端 resolve_folder 按 / 逐级 find_or_create，无需改后端。
 function mountFolderPicker(prefix, targetInputId){
@@ -793,20 +868,33 @@ function mountFolderPicker(prefix, targetInputId){
   const folders = document.getElementById(prefix+"Folders");
   const cur = document.getElementById(prefix+"Cur");
   const input = document.getElementById(targetInputId);
+  const histBox = createHistoryBox(picker);
+  function pathStr(){ return pick.path.slice(1).map(p=>p[1]).join("/"); }   // 空串 = 根目录
+  function chooseHistory(h){
+    const p = String(h.path || "");
+    input.value = p;
+    if (cur) cur.textContent = "已选：" + (p || "根目录");
+    picker.style.display = "none";
+    dirHistoryAdd(p, p || "根目录", h.fileId || "");
+  }
   function renderCrumb(){
-    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ")
+                    + ' <a data-refresh="1" style="color:#7c3aed">🔄 刷新</a>';
     crumb.querySelectorAll("a").forEach(a=>{
       a.onclick = async () => {
+        if (a.dataset.refresh){
+          folders.innerHTML = '<span class="loading">刷新中…</span>';
+          try { renderFolders(await loadFolders(pick.currentParent, true)); }
+          catch(e){ folders.innerHTML = '<span class="err">刷新失败：'+esc(e.message)+'</span>'; }
+          renderCrumb();
+          return;
+        }
         const i = +a.dataset.i;
         pick.path = pick.path.slice(0, i+1);
         pick.currentParent = pick.path[i][0];
-        const r = await api({ action:"list", parent: pick.currentParent });
-        dbg(r);
-        if (r && r.ok && Array.isArray(r.items)){
-          renderFolders(r.items);
-        } else {
-          alert("加载路径数据失败：" + (r?.error || "未知错误"));
-        }
+        folders.innerHTML = '<span class="loading">加载中…</span>';
+        try { renderFolders(await loadFolders(pick.currentParent)); }
+        catch(e){ folders.innerHTML = '<span class="err">加载失败：'+esc(e.message)+'</span>'; }
         renderCrumb();
       };
     });
@@ -828,14 +916,9 @@ function mountFolderPicker(prefix, targetInputId){
         if (!fid){ alert("该目录缺少 fileId，无法展开。"); return; }
         pick.currentParent = fid;
         pick.path.push([fid, it.name]);
-        const r = await api({ action:"list", parent: fid });
-        dbg(r);
-        if (r && r.ok && Array.isArray(r.items)){
-          renderFolders(r.items);
-        } else {
-          alert("加载子目录失败：" + (r?.error || "未知错误"));
-          pick.path.pop();
-        }
+        folders.innerHTML = '<span class="loading">加载中…</span>';
+        try { renderFolders(await loadFolders(fid)); }
+        catch(e){ alert("加载子目录失败：" + (e?.message || "未知错误")); pick.path.pop(); }
         renderCrumb();
       };
       folders.appendChild(d);
@@ -845,13 +928,10 @@ function mountFolderPicker(prefix, targetInputId){
   document.getElementById(prefix+"Btn").onclick = async () => {
     picker.style.display = "block";
     pick = { currentParent:"root", path:[["root","根目录"]] };
-    const r = await api({ action:"list", parent:"root" });
-    dbg(r);
-    if (r && r.ok && Array.isArray(r.items)){
-      renderFolders(r.items);
-    } else {
-      folders.innerHTML = '<span class="err">加载根目录失败：' + esc(r?.error || '未知错误') + '</span>';
-    }
+    renderDirHistory(histBox, chooseHistory);
+    folders.innerHTML = '<span class="loading">加载中…</span>';
+    try { renderFolders(await loadFolders("root")); }
+    catch(e){ folders.innerHTML = '<span class="err">加载根目录失败：' + esc(e.message) + '</span>'; }
     renderCrumb();
     if (cur) cur.textContent = "";
   };
@@ -860,6 +940,7 @@ function mountFolderPicker(prefix, targetInputId){
     input.value = parts.join("/");                   // 空字符串=根目录
     if (cur) cur.textContent = "已选：" + (parts.join("/") || "根目录");
     picker.style.display = "none";
+    dirHistoryAdd(pathStr(), pathStr() || "根目录", pick.currentParent === "root" ? "" : pick.currentParent);
   };
   document.getElementById(prefix+"NewBtn").onclick = async () => {
     const name = document.getElementById(prefix+"NewName").value.trim();
@@ -867,14 +948,11 @@ function mountFolderPicker(prefix, targetInputId){
     const r = await api({ action:"create_folder", parent: pick.currentParent, name });
     dbg(r);
     if (!r.ok) { if (cur) cur.textContent = "创建失败：" + esc(r.error); return; }
+    forgetDirCache(pick.currentParent);            // 父目录多了个子目录，缓存作废
     pick.currentParent = r.fileId;
     pick.path.push([r.fileId, name]);
     document.getElementById(prefix+"NewName").value = "";
-    const r2 = await api({ action:"list", parent: r.fileId });
-    dbg(r2);
-    if (r2 && r2.ok && Array.isArray(r2.items)){
-      renderFolders(r2.items);
-    }
+    try { renderFolders(await loadFolders(r.fileId)); } catch(e){}
     renderCrumb();
     if (cur) cur.textContent = "已新建并进入：" + name;
   };
@@ -892,18 +970,39 @@ function mountFolderPickerV2(prefix, onPick){
   const picker = document.getElementById(prefix+"Picker");
   const crumb  = document.getElementById(prefix+"Crumb");
   const folders= document.getElementById(prefix+"Folders");
-  const hint   = document.getElementById(prefix+"Hint");
+  const hint   = document.getElementById(prefix+"Hint") || document.getElementById(prefix+"Cur");
+  const histBox = createHistoryBox(picker);
+  function pathStr(){ return pick.path.slice(1).map(p=>p[1]).join("/"); }   // 空串 = 根目录
+  async function chooseHistory(h){
+    const p = String(h.path || "");
+    const r = await api({ action:"resolve_path", path: p });
+    if (!r.ok){
+      if (hint) hint.textContent = "该历史目录已失效（可能已被删除），请重新浏览选择";
+      return;
+    }
+    picker.style.display = "none";
+    if (hint) hint.textContent = "已选：" + (p || "根目录");
+    onPick(r.fileId, p || "根目录");
+    dirHistoryAdd(p, p || "根目录", r.fileId);
+  }
   function renderCrumb(){
-    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ");
+    crumb.innerHTML = pick.path.map((p,i)=>'<a data-i="'+i+'">'+esc(p[1])+'</a>').join(" / ")
+                    + ' <a data-refresh="1" style="color:#7c3aed">🔄 刷新</a>';
     crumb.querySelectorAll("a").forEach(a=>{
       a.onclick = async () => {
+        if (a.dataset.refresh){
+          folders.innerHTML = '<span class="loading">刷新中…</span>';
+          try { renderFolders(await loadFolders(pick.currentParent, true)); }
+          catch(e){ folders.innerHTML='<span class="err">刷新失败：'+esc(e.message)+'</span>'; }
+          renderCrumb();
+          return;
+        }
         const i = +a.dataset.i;
         pick.path = pick.path.slice(0, i+1);
         pick.currentParent = pick.path[i][0];
-        const r = await api({ action:"list", parent: pick.currentParent });
-        dbg(r);
-        if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
-        else alert("加载路径数据失败：" + (r?.error || "未知错误"));
+        folders.innerHTML = '<span class="loading">加载中…</span>';
+        try { renderFolders(await loadFolders(pick.currentParent)); }
+        catch(e){ folders.innerHTML='<span class="err">加载失败：'+esc(e.message)+'</span>'; }
         renderCrumb();
       };
     });
@@ -920,10 +1019,9 @@ function mountFolderPickerV2(prefix, onPick){
         const fid = it.fileId || it._rawId || "";
         if (!fid){ alert("该目录缺少 fileId，无法展开。"); return; }
         pick.currentParent = fid; pick.path.push([fid, it.name]);
-        const r = await api({ action:"list", parent: fid });
-        dbg(r);
-        if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
-        else { alert("加载子目录失败：" + (r?.error || "未知错误")); pick.path.pop(); }
+        folders.innerHTML = '<span class="loading">加载中…</span>';
+        try { renderFolders(await loadFolders(fid)); }
+        catch(e){ alert("加载子目录失败：" + (e?.message || "未知错误")); pick.path.pop(); }
         renderCrumb();
       };
       folders.appendChild(d);
@@ -933,10 +1031,10 @@ function mountFolderPickerV2(prefix, onPick){
   document.getElementById(prefix+"Btn").onclick = async () => {
     picker.style.display = "block";
     pick = { currentParent:"root", path:[["root","根目录"]] };
-    const r = await api({ action:"list", parent:"root" });
-    dbg(r);
-    if (r && r.ok && Array.isArray(r.items)) renderFolders(r.items);
-    else folders.innerHTML = '<span class="err">加载根目录失败：'+esc(r?.error||"未知错误")+'</span>';
+    renderDirHistory(histBox, chooseHistory);
+    folders.innerHTML = '<span class="loading">加载中…</span>';
+    try { renderFolders(await loadFolders("root")); }
+    catch(e){ folders.innerHTML = '<span class="err">加载根目录失败：'+esc(e.message)+'</span>'; }
     renderCrumb();
     if (hint) hint.textContent = "";
   };
@@ -946,6 +1044,7 @@ function mountFolderPickerV2(prefix, onPick){
     if (hint) hint.textContent = "已选：" + namePath;
     picker.style.display = "none";
     onPick(fileId, namePath);
+    dirHistoryAdd(pathStr(), pathStr() || "根目录", fileId === "root" ? "" : fileId);
   };
   document.getElementById(prefix+"Cancel").onclick = () => { picker.style.display = "none"; };
   document.getElementById(prefix+"NewBtn").onclick = async () => {
@@ -954,11 +1053,10 @@ function mountFolderPickerV2(prefix, onPick){
     const r = await api({ action:"create_folder", parent: pick.currentParent, name });
     dbg(r);
     if (!r.ok){ if (hint) hint.textContent = "创建失败：" + esc(r.error); return; }
+    forgetDirCache(pick.currentParent);            // 父目录多了个子目录，缓存作废
     pick.currentParent = r.fileId; pick.path.push([r.fileId, name]);
     document.getElementById(prefix+"NewName").value = "";
-    const r2 = await api({ action:"list", parent: r.fileId });
-    dbg(r2);
-    if (r2 && r2.ok && Array.isArray(r2.items)) renderFolders(r2.items);
+    try { renderFolders(await loadFolders(r.fileId)); } catch(e){}
     renderCrumb();
     if (hint) hint.textContent = "已新建并进入：" + name;
   };

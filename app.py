@@ -55,6 +55,81 @@ def _resolve_data_dir():
 DATA_DIR = _resolve_data_dir()
 DEBUG_LOG = os.path.join(DATA_DIR, "casgen_debug.log")
 AUTH_FILE = os.path.join(DATA_DIR, "casgen_auth.json")  # 登录态持久化（存明文 token，本地单用户 NAS 可接受）
+DIR_HISTORY_FILE = os.path.join(DATA_DIR, "casgen_dir_history.json")  # 目录选择器用过的历史目录
+DIR_HISTORY_MAX = 20
+_DIR_HISTORY_LOCK = threading.Lock()
+
+# 目录列表缓存：139 接口单页 100 条，大目录要翻很多页，逐页请求非常慢。
+# 缓存后再次展开同一目录（返回上级再进、重开选择器）可秒开。
+_LIST_CACHE = {}
+_LIST_CACHE_LOCK = threading.Lock()
+LIST_CACHE_TTL = 300  # 秒
+
+
+def _load_dir_history():
+    try:
+        with open(DIR_HISTORY_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def _save_dir_history(items):
+    try:
+        with open(DIR_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(items[:DIR_HISTORY_MAX], f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def _dir_history_add(entry):
+    if not entry:
+        return _load_dir_history()
+    key = str(entry.get("path") or entry.get("fileId") or "")
+    if not key:
+        return _load_dir_history()
+    with _DIR_HISTORY_LOCK:
+        items = _load_dir_history()
+        items = [x for x in items
+                 if str(x.get("path") or x.get("fileId") or "") != key]
+        entry = dict(entry)
+        entry["ts"] = int(time.time())
+        items.insert(0, entry)
+        items = items[:DIR_HISTORY_MAX]
+        _save_dir_history(items)
+        return items
+
+
+def _list_dir_cached(parent, refresh=False):
+    """带缓存地取完整目录列表；refresh=True 强制重新拉取。"""
+    key = str(parent or "root")
+    now = time.time()
+    if not refresh:
+        with _LIST_CACHE_LOCK:
+            hit = _LIST_CACHE.get(key)
+            if hit and (now - hit[0]) < LIST_CACHE_TTL:
+                return list(hit[1]), True
+    items = []
+    cursor = None
+    while True:
+        page, cursor, _ = CLIENT.list_dir(parent, cursor)
+        if not page:
+            break
+        items.extend(page)
+        if not cursor:
+            break
+    with _LIST_CACHE_LOCK:
+        _LIST_CACHE[key] = (now, list(items))
+    return items, False
+
+
+def _invalidate_list_cache(parent=None):
+    with _LIST_CACHE_LOCK:
+        if parent is None:
+            _LIST_CACHE.clear()
+        else:
+            _LIST_CACHE.pop(str(parent or "root"), None)
 
 
 def _migrate_legacy_data():
@@ -427,6 +502,7 @@ class H(BaseHTTPRequestHandler):
                     PROVIDER = "139"
                     AUTH_EXPIRED = False
                     _save_auth(auth, "139")
+                    _invalidate_list_cache()   # 换账号后旧缓存不能再用
                     resp = {"ok": True, "provider": "139",
                             "version": VERSION,
                             "root": [self._fmt(i) for i in items],
@@ -448,20 +524,51 @@ class H(BaseHTTPRequestHandler):
         if AUTH_EXPIRED:
             return self._json({"ok": False, "needLogin": True, "error": "登录已失效，请重新登??"}, 400)
 
+        # ---------- 目录选择器用过的历史目录（换设备/刷新也还在） ----------
+        if action == "dir_history":
+            return self._json({"ok": True, "items": _load_dir_history()})
+
+        if action == "dir_history_add":
+            entry = {"path": (p.get("path") or "").strip(),
+                     "fileId": (p.get("fileId") or "").strip(),
+                     "name": (p.get("name") or "").strip(),
+                     "kind": (p.get("kind") or "path").strip()}
+            if not entry["path"] and not entry["fileId"]:
+                return self._json({"ok": False, "error": "缺少目录信息"}, 400)
+            return self._json({"ok": True, "items": _dir_history_add(entry)})
+
+        if action == "dir_history_del":
+            key = str((p.get("path") or p.get("fileId") or "")).strip()
+            with _DIR_HISTORY_LOCK:
+                items = [x for x in _load_dir_history()
+                         if str(x.get("path") or x.get("fileId") or "") != key]
+                _save_dir_history(items)
+            return self._json({"ok": True, "items": items})
+
+        # 目录路径 -> fileId（只读，目录不存在不创建；供历史目录直接复用）
+        if action == "resolve_path":
+            path = (p.get("path") or "").strip().strip("/")
+            try:
+                if not path:
+                    fid = "root"
+                else:
+                    # 逐级只读查找文件夹（resolve_path_readonly 末级按文件找，不适用于目录）
+                    fid = "root"
+                    for part in [x for x in path.split("/") if x]:
+                        fid = CLIENT._find_folder_readonly(part, fid)
+            except Exception as e:
+                return self._json({"ok": False, "error": "解析目录失败：" + str(e)}, 400)
+            return self._json({"ok": True, "fileId": fid, "path": path})
+
         if action == "list":
             parent = p.get("parent", "root")
+            refresh = bool(p.get("refresh"))
+            folders_only = bool(p.get("folders_only"))
             try:
                 # 翻页：139 /file/list 单页最多 100 条，目录文件多时必须循环取完，
                 # 否则 >100 条会被截断丢失（之前只取第一页，是真实 bug）。
-                items = []
-                cursor = None
-                while True:
-                    page, cursor, _ = CLIENT.list_dir(parent, cursor)
-                    if not page:
-                        break
-                    items.extend(page)
-                    if not cursor:
-                        break
+                # 目录选择器只用到文件夹，加缓存后重复展开同一目录不再重复翻页。
+                items, cached = _list_dir_cached(parent, refresh=refresh)
             except Exception as e:
                 import traceback; traceback.print_exc()
                 return self._json({"ok": False, "error": f"获取目录列表失败：{str(e)}"}, 500)
@@ -471,13 +578,17 @@ class H(BaseHTTPRequestHandler):
                 f.write(f"Items count: {len(items)}\n")
                 for i, item in enumerate(items[:5]):  # 只记录前5项
                     f.write(f"Item {i}: type={item.get('type')}, fileType={item.get('fileType')}, contentType={item.get('contentType')}, name={item.get('name')}, fileId={item.get('fileId')}\n")
-            fmt = [self._fmt(i) for i in items]
+            raw_items = items
+            if folders_only:
+                raw_items = [i for i in items if isinstance(i, dict) and Yun139._is_folder(i)]
+            fmt = [self._fmt(i) for i in raw_items]
             # 透传 139 原始 fileId，防?? _fmt 归一化在个别字段名下丢失??
             # 前端点击展开时用 it.fileId || it._rawId 兜底，避?? parent 为空退化成根目录?
-            for raw, f in zip(items, fmt):
+            for raw, f in zip(raw_items, fmt):
                 f["_rawId"] = (raw.get("fileId") or raw.get("contentID") or raw.get("id")
                                or raw.get("catalogId") or raw.get("fid") or "")
-            return self._json({"ok": True, "items": fmt, "count": len(items)})
+            return self._json({"ok": True, "items": fmt, "count": len(raw_items),
+                               "total": len(items), "cached": cached})
 
         # ---------- 目录选择器：在指定目录下新建子目?? ----------
         if action == "create_folder":
@@ -489,6 +600,7 @@ class H(BaseHTTPRequestHandler):
                 fid = CLIENT.find_or_create_folder(name, parent)
             except Exception as e:
                 return self._json({"ok": False, "error": "创建文件夹失败：" + str(e)}, 400)
+            _invalidate_list_cache(parent)   # 新建后原缓存已过期
             return self._json({"ok": True, "fileId": fid, "name": name, "parent": parent})
 
         if action == "plan":
@@ -504,6 +616,7 @@ class H(BaseHTTPRequestHandler):
             delete = bool(p.get("delete_source", False))
             res = CLIENT.generate(root, delete_source=delete)
             RECORDS = [r for r in res if r.get("status") == "uploaded"]
+            _invalidate_list_cache(root)   # 目录下多了 .cas / 少了原视频
             _log_debug("convert", res)
             return self._json({"ok": True, "version": VERSION, "results": res})
 
@@ -672,6 +785,7 @@ class H(BaseHTTPRequestHandler):
                 import traceback as _tb
                 _log_debug("unhandled", {"action": "share_save", "error": repr(e), "trace": _tb.format_exc()})
                 return self._json({"ok": False, "error": "转存失败??" + str(e)})
+            _invalidate_list_cache()   # 转存后目标目录内容已变，缓存作废
             # [BUG修复] 前端 share.html 读的是 addToMonitor + monitor 对象（驼峰），
             # 后端原先只返回 monitorAdded/monitorId，前端 if(d.addToMonitor && d.monitor) 永远为假
             # => 既不会提示「已加入监控」，也不会刷新监控列表，用户以为成功了其实没加。
